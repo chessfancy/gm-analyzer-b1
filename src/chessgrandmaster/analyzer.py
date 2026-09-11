@@ -5,6 +5,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 from .parallel_runner import ParallelLucasRunner
+from .engine_manifest import configured_engine
 
 
 class TournamentAnalyzer:
@@ -50,8 +51,10 @@ class TournamentAnalyzer:
 
     def create_run(self, scope=None):
 
+        engine = configured_engine()
+
         config = {
-            "engine": "Stockfish 19",
+            "engine": engine["label"],
             "workers": self.workers,
             "threads_per_worker": self.threads,
             "hash_mb_per_worker": self.hash_mb,
@@ -84,8 +87,8 @@ class TournamentAnalyzer:
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            "Stockfish",
-            "19",
+            engine["name"],
+            engine["version"],
             binary_sha,
             self.workers,
             self.threads,

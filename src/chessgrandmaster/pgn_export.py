@@ -6,6 +6,8 @@ from pathlib import Path
 import chess
 import chess.pgn
 
+from .engine_manifest import configured_engine
+
 
 class LucasPGNExporter:
 
@@ -13,12 +15,15 @@ class LucasPGNExporter:
         self,
         db_path,
         run_id,
-        engine_label="Stockfish 19",
+        engine_label=None,
         configured_time_sec=3.0,
     ):
         self.db_path = str(db_path)
         self.run_id = run_id
-        self.engine_label = engine_label
+        self.engine_label = (
+            engine_label
+            or configured_engine()["label"]
+        )
         self.configured_time_sec = configured_time_sec
 
 

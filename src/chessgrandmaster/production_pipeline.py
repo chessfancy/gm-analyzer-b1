@@ -14,6 +14,7 @@ import chess.pgn
 
 from .analyzer import TournamentAnalyzer
 from .pgn_export import LucasPGNExporter
+from .engine_manifest import verify_engine_binary
 
 
 PIPELINE_VERSION = 1
@@ -729,6 +730,49 @@ def find_or_create_run(
     config
 ):
 
+    def normalize_engine_config(value):
+        if not isinstance(value, dict):
+            return {}
+
+        result = dict(value)
+
+        # Runtime path is not part of engine identity.
+        binary = result.pop("binary", None)
+
+        # When the binary exists, identify it by content instead.
+        if (
+            binary
+            and "binary_sha256" not in result
+        ):
+            binary_path = Path(binary).expanduser()
+
+            if binary_path.is_file():
+                result["binary_sha256"] = (
+                    sha256_file(binary_path)
+                )
+
+        return result
+
+
+    desired_engine = normalize_engine_config(
+        config
+    )
+
+    desired_scope = {
+        "purpose":
+            "production_tournament_full",
+
+        "pipeline_version":
+            PIPELINE_VERSION,
+
+        "source_sha256":
+            source_sha,
+
+        "engine":
+            desired_engine,
+    }
+
+
     con = sqlite3.connect(
         db_path
     )
@@ -736,7 +780,14 @@ def find_or_create_run(
     rows = con.execute("""
         SELECT
             id,
-            config_json
+            config_json,
+            binary_sha256,
+            workers,
+            threads,
+            hash_mb,
+            multipv,
+            time_limit_ms,
+            depth_limit
 
         FROM analysis_runs
 
@@ -752,23 +803,11 @@ def find_or_create_run(
     con.close()
 
 
-    desired_scope = {
-        "purpose":
-            "production_tournament_full",
-
-        "pipeline_version":
-            PIPELINE_VERSION,
-
-        "source_sha256":
-            source_sha,
-
-        "engine":
-            config,
-    }
-
-
     # Exact modern pipeline match.
-    for run_id, config_json in rows:
+    for row in rows:
+
+        run_id = row[0]
+        config_json = row[1]
 
         try:
             data = json.loads(
@@ -789,12 +828,32 @@ def find_or_create_run(
             return run_id, False
 
 
-    # Compatibility with our original
-    # production run #5:
-    # old scope only contained purpose.
+    # Compatibility with older production runs.
+    #
+    # Old runs may have:
+    #
+    #     scope = {
+    #         "purpose":
+    #             "production_tournament_full"
+    #     }
+    #
+    # Recover them only when the actual engine/search
+    # configuration also matches.
     if source_count == 1:
 
-        for run_id, config_json in rows:
+        for row in rows:
+
+            (
+                run_id,
+                config_json,
+                binary_sha256,
+                workers,
+                threads,
+                hash_mb,
+                multipv,
+                time_limit_ms,
+                depth_limit,
+            ) = row
 
             try:
                 data = json.loads(
@@ -808,13 +867,86 @@ def find_or_create_run(
                 {}
             )
 
-            if (
+            if not (
                 isinstance(scope, dict)
                 and
                 scope.get("purpose")
                 ==
                 "production_tournament_full"
             ):
+                continue
+
+
+            # Transitional modern scope:
+            # it may contain an engine config whose only
+            # portability problem is the binary path.
+            stored_engine = normalize_engine_config(
+                scope.get("engine")
+            )
+
+
+            # Original legacy production run:
+            # reconstruct engine identity from DB columns.
+            if not stored_engine:
+
+                stored_engine = {
+                    "workers":
+                        workers,
+
+                    "threads":
+                        threads,
+
+                    "hash_mb":
+                        hash_mb,
+
+                    "multipv":
+                        multipv,
+
+                    "depth":
+                        depth_limit,
+                }
+
+                if time_limit_ms is not None:
+                    stored_engine["time_sec"] = (
+                        time_limit_ms / 1000.0
+                    )
+
+
+            # analysis_runs has always stored the actual
+            # engine binary digest. Add it when available.
+            if binary_sha256:
+                stored_engine["binary_sha256"] = (
+                    binary_sha256
+                )
+
+
+            # Ignore absent legacy metadata, but never ignore
+            # a conflicting value.
+            compatible = True
+
+            for key, desired_value in (
+                desired_engine.items()
+            ):
+
+                if (
+                    key in stored_engine
+                    and
+                    stored_engine[key]
+                    != desired_value
+                ):
+                    compatible = False
+                    break
+
+                if (
+                    key not in stored_engine
+                    and
+                    key != "binary_sha256"
+                ):
+                    compatible = False
+                    break
+
+
+            if compatible:
                 return run_id, False
 
 
@@ -823,6 +955,7 @@ def find_or_create_run(
     )
 
     return run_id, True
+
 
 
 # ============================================================
@@ -1085,6 +1218,10 @@ def run_pipeline(
     )
 
     engine_binary = resolve_engine_binary(
+        engine_binary
+    )
+
+    engine_meta = verify_engine_binary(
         engine_binary
     )
 
@@ -1393,19 +1530,19 @@ def run_pipeline(
     exporter = LucasPGNExporter(
         db_path,
         run_id=run_id,
-        engine_label="Stockfish 19",
+        engine_label=engine_meta["label"],
         configured_time_sec=time_sec,
     )
 
 
     mistake_path = (
         output_dir /
-        f"Mistakes_{slug}_SF19.pgn"
+        f"Mistakes_{slug}_{engine_meta['output_tag']}.pgn"
     )
 
     blunder_path = (
         output_dir /
-        f"Blunders_{slug}_SF19.pgn"
+        f"Blunders_{slug}_{engine_meta['output_tag']}.pgn"
     )
 
 

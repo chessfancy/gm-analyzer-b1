@@ -14,6 +14,7 @@ dependencies = [
 
 [project.scripts]
 cgm-analyze = "chessgrandmaster.cli:main"
+cgm-engine = "chessgrandmaster.engine_manifest:main"
 
 [project.optional-dependencies]
 dev = [
@@ -22,6 +23,9 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+chessgrandmaster = ["engine.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

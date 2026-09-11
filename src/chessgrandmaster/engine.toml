@@ -1,0 +1,18 @@
+[engine]
+name = "Stockfish"
+version = "19"
+label = "Stockfish 19"
+uci_name = "Stockfish 19"
+tag = "sf_19"
+output_tag = "SF19"
+repository = "official-stockfish/Stockfish"
+
+[platform.linux_x86_64]
+asset = "stockfish-linux-x86-64-universal.tar.gz"
+binary = "stockfish-linux-x86-64-universal"
+archive_sha256 = "9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f"
+
+[platform.linux_arm64]
+asset = "stockfish-linux-arm64-universal.tar.gz"
+binary = "stockfish-linux-arm64-universal"
+archive_sha256 = "fe26cfd1d9db4c8af3d21e24d9ff34cacb31c1f940085a7583da11796f2bac01"

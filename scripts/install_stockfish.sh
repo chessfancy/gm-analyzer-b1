@@ -1,50 +1,49 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="19"
-TAG="sf_19"
+ROOT="$(
+    cd "$(dirname "${BASH_SOURCE[0]}")/.."
+    pwd
+)"
 
-ARCH="$(uname -m)"
+cd "$ROOT"
 
-case "$ARCH" in
-    x86_64|amd64)
-        ASSET="stockfish-linux-x86-64-universal.tar.gz"
-        BINARY="stockfish-linux-x86-64-universal"
-        SHA256="9defc0d4e55d49c65a6d042f3e571a39fcea499ade6dbe741b53b8c65e03611f"
-        ;;
-    aarch64|arm64)
-        ASSET="stockfish-linux-arm64-universal.tar.gz"
-        BINARY="stockfish-linux-arm64-universal"
-        SHA256="fe26cfd1d9db4c8af3d21e24d9ff34cacb31c1f940085a7583da11796f2bac01"
-        ;;
-    *)
-        echo "Unsupported architecture: $ARCH" >&2
-        exit 1
-        ;;
-esac
-
-URL="https://github.com/official-stockfish/Stockfish/releases/download/${TAG}/${ASSET}"
+eval "$(
+    PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}" \
+        python -m chessgrandmaster.engine_manifest \
+        shell-install-spec
+)"
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-echo "Installing Stockfish ${VERSION}"
-echo "Architecture: ${ARCH}"
+echo "Installing ${CGM_ENGINE_LABEL}"
+echo "Asset       : ${CGM_ENGINE_ASSET}"
+echo "Download    : ${CGM_ENGINE_URL}"
 
 curl -fL \
     --retry 3 \
     --retry-delay 2 \
-    "$URL" \
-    -o "$TMP/$ASSET"
+    "$CGM_ENGINE_URL" \
+    -o "$TMP/$CGM_ENGINE_ASSET"
 
-echo "${SHA256}  $TMP/$ASSET" | sha256sum --check -
+echo \
+    "${CGM_ENGINE_ARCHIVE_SHA256}  $TMP/$CGM_ENGINE_ASSET" \
+    | sha256sum --check -
 
-tar -xzf "$TMP/$ASSET" -C "$TMP"
+tar -xzf \
+    "$TMP/$CGM_ENGINE_ASSET" \
+    -C "$TMP"
 
-ENGINE="$(find "$TMP" -type f -name "$BINARY" | head -n 1)"
+ENGINE="$(
+    find "$TMP" \
+        -type f \
+        -name "$CGM_ENGINE_BINARY" \
+        | head -n 1
+)"
 
 if [[ -z "$ENGINE" ]]; then
-    echo "Stockfish binary not found after extraction." >&2
+    echo "Configured Stockfish binary not found after extraction." >&2
     exit 1
 fi
 
@@ -60,7 +59,7 @@ echo "Installed:"
 command -v stockfish
 
 echo
-stockfish <<'UCI' | grep -m1 '^id name'
-uci
-quit
-UCI
+PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}" \
+    python -m chessgrandmaster.engine_manifest \
+    verify \
+    /usr/local/bin/stockfish

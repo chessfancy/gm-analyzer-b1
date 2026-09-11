@@ -6,6 +6,7 @@ import chess.pgn
 import pytest
 
 from chessgrandmaster.production_pipeline import run_pipeline
+from chessgrandmaster.engine_manifest import configured_engine
 
 
 pytestmark = pytest.mark.skipif(
@@ -110,8 +111,12 @@ def test_tre_2026_game_1_lucas_semantics(tmp_path):
 
     # Export structure:
     # error slice first, original full game second.
+    engine_tag = configured_engine()["output_tag"]
+
     blunder_files = list(
-        (root / "output").glob("Blunders_*_SF19.pgn")
+        (root / "output").glob(
+            f"Blunders_*_{engine_tag}.pgn"
+        )
     )
 
     assert len(blunder_files) == 1
