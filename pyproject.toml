@@ -12,6 +12,9 @@ dependencies = [
     "python-chess>=1.999",
 ]
 
+[project.scripts]
+cgm-analyze = "chessgrandmaster.cli:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
