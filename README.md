@@ -28,6 +28,18 @@ The standard benchmark uses Threads=1, MultiPV=1, Hash=256 MB, fixed 1M nodes, r
 
 The raw phase clears Stockfish hash between sampled positions. The full Lucas phase uses a persistent engine and includes the post-move second search when required.
 
+## Compare qualification reports
+
+After running the same qualification on multiple machines, compare the JSON reports with:
+
+```bash
+cgm-bench compare codespaces.json deepnote.json kaggle.json vps.json
+```
+
+`compare` validates that reports use the same schema, Stockfish UCI identity, sample corpus, fixed-work nodes, search configuration, tested depths, P95 target and tournament move count before printing a side-by-side table. Binary SHA256 and local file paths are allowed to differ so x86_64 and arm64 official Stockfish builds can still be compared.
+
+The table reports fixed-work NPS plus full Lucas pipeline P95 for every tested depth. The file stem is used as the platform label, so meaningful names such as `deepnote.json` and `kaggle.json` are recommended.
+
 ## Development setup
 
 ```bash
