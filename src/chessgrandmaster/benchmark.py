@@ -873,6 +873,14 @@ def build_report(
         count=samples,
     )
 
+    # --------------------------------------------------------
+    # Phase 1:
+    # Fixed-work benchmark.
+    #
+    # This measures hardware throughput only.
+    # It is NOT a production search policy.
+    # --------------------------------------------------------
+
     fixed = (
         run_fixed_work_phase(
             engine_path,
@@ -881,6 +889,14 @@ def build_report(
             hash_mb=hash_mb,
         )
     )
+
+    # --------------------------------------------------------
+    # Phase 2:
+    # Raw Stockfish time-to-depth.
+    #
+    # Clear Hash between sampled positions so machines can be
+    # compared using approximately the same isolated workload.
+    # --------------------------------------------------------
 
     depth_rows = []
 
@@ -899,49 +915,97 @@ def build_report(
             **result["summary"],
         })
 
+    # --------------------------------------------------------
+    # Phase 3:
+    # FULL Lucas-compatible move analysis at EVERY depth.
+    #
+    # This includes:
+    #   primary search
+    #   +
+    #   post-move second search when required.
+    #
+    # Production qualification MUST be based on this phase,
+    # not on raw primary-search timing.
+    # --------------------------------------------------------
+
+    pipeline_rows = []
+
+    for depth in depths:
+        pipeline = (
+            run_pipeline_phase(
+                engine_path,
+                positions,
+                depth=depth,
+                hash_mb=hash_mb,
+            )
+        )
+
+        pipeline_rows.append({
+            key: value
+            for key, value
+            in pipeline.items()
+            if key != "rows"
+        })
+
+    # --------------------------------------------------------
+    # Recommendation
+    #
+    # Highest tested depth whose FULL Lucas pipeline P95 fits
+    # the operational target.
+    # --------------------------------------------------------
+
     suggested_depth = (
         recommend_depth(
-            depth_rows,
+            pipeline_rows,
             target_p95_seconds,
         )
     )
 
-    pipeline_depth = (
-        suggested_depth
-        if suggested_depth
-        is not None
-        else min(
-            depths
-        )
-    )
-
-    pipeline = (
-        run_pipeline_phase(
-            engine_path,
-            positions,
-            depth=pipeline_depth,
-            hash_mb=hash_mb,
-        )
-    )
-
-    one_worker_minutes = (
-        pipeline["mean_seconds"]
-        * tournament_moves
-        / 60.0
-    )
+    # --------------------------------------------------------
+    # Capacity estimates per depth
+    # --------------------------------------------------------
 
     workers = hardware[
         "suggested_workers"
     ]
 
-    ideal_parallel_minutes = (
-        one_worker_minutes
-        / workers
-    )
+    capacity_rows = []
+
+    for pipeline in pipeline_rows:
+        one_worker_minutes = (
+            pipeline["mean_seconds"]
+            * tournament_moves
+            / 60.0
+        )
+
+        ideal_parallel_minutes = (
+            one_worker_minutes
+            / workers
+        )
+
+        capacity_rows.append({
+            "depth":
+                pipeline["depth"],
+
+            "tournament_moves":
+                tournament_moves,
+
+            "mean_seconds_per_move":
+                pipeline["mean_seconds"],
+
+            "one_worker_minutes":
+                one_worker_minutes,
+
+            "suggested_workers":
+                workers,
+
+            "ideal_parallel_minutes":
+                ideal_parallel_minutes,
+        })
 
     return {
         "schema_version":
-            1,
+            2,
 
         "created_at":
             datetime.now(
@@ -1015,38 +1079,26 @@ def build_report(
         "depth_benchmarks":
             depth_rows,
 
+        "pipeline_benchmarks":
+            pipeline_rows,
+
         "target_p95_seconds":
             target_p95_seconds,
 
         "suggested_depth":
             suggested_depth,
 
-        "pipeline": {
-            key: value
-            for key, value
-            in pipeline.items()
-            if key != "rows"
-        },
+        "suggested_depth_basis":
+            "full_lucas_pipeline_p95",
 
-        "capacity_estimate": {
-            "tournament_moves":
-                tournament_moves,
+        "capacity_estimates":
+            capacity_rows,
 
-            "one_worker_minutes":
-                one_worker_minutes,
-
-            "suggested_workers":
-                workers,
-
-            "ideal_parallel_minutes":
-                ideal_parallel_minutes,
-
-            "note": (
-                "Parallel estimate is idealized. "
-                "Real throughput must be validated "
-                "with a full batch run."
-            ),
-        },
+        "capacity_note": (
+            "Parallel estimates are idealized. "
+            "Real throughput must be validated "
+            "with a full batch run."
+        ),
     }
 
 
@@ -1075,56 +1127,72 @@ def print_report(
 
     print()
     print(
-        "=" * 72
+        "=" * 76
     )
     print(
         "CHESSGRANDMASTER COMPUTE QUALIFICATION"
     )
     print(
-        "=" * 72
+        "=" * 76
     )
+
+    # --------------------------------------------------------
+    # Engine
+    # --------------------------------------------------------
 
     print()
     print(
         "ENGINE"
     )
+
     print(
         "  Name          :",
         engine["uci_name"],
     )
+
     print(
         "  Threads       :",
         engine["threads"],
     )
+
     print(
         "  Hash          :",
         f"{engine['hash_mb']} MB",
     )
+
     print(
         "  MultiPV       :",
         engine["multipv"],
     )
 
+    # --------------------------------------------------------
+    # Hardware
+    # --------------------------------------------------------
+
     print()
     print(
         "HARDWARE"
     )
+
     print(
         "  Host          :",
         hardware["hostname"],
     )
+
     print(
         "  Logical CPUs  :",
         hardware[
             "logical_cpu"
         ],
     )
+
     print(
         "  CPU quota     :",
         hardware[
             "cgroup_cpu_quota"
         ],
     )
+
     print(
         "  Effective CPU :",
         round(
@@ -1134,6 +1202,7 @@ def print_report(
             2,
         ),
     )
+
     print(
         "  Worker guess  :",
         hardware[
@@ -1155,14 +1224,20 @@ def print_report(
         ),
     )
 
+    # --------------------------------------------------------
+    # Fixed work
+    # --------------------------------------------------------
+
     print()
     print(
         "FIXED WORK"
     )
+
     print(
         "  Target nodes  :",
         f"{fixed['nodes']:,}",
     )
+
     print(
         "  Median time   :",
         _fmt_seconds(
@@ -1171,6 +1246,7 @@ def print_report(
             ]
         ),
     )
+
     print(
         "  P95 time      :",
         _fmt_seconds(
@@ -1179,14 +1255,19 @@ def print_report(
             ]
         ),
     )
+
     print(
         "  Median NPS    :",
         f"{fixed['median_nps']:,.0f}",
     )
 
+    # --------------------------------------------------------
+    # Raw search
+    # --------------------------------------------------------
+
     print()
     print(
-        "TIME TO DEPTH"
+        "RAW TIME TO DEPTH"
     )
 
     print(
@@ -1206,95 +1287,132 @@ def print_report(
             + str(
                 row["depth"]
             ).ljust(8)
+
             + _fmt_seconds(
                 row[
                     "median_seconds"
                 ]
             ).rjust(12)
+
             + _fmt_seconds(
                 row[
                     "p95_seconds"
                 ]
             ).rjust(12)
+
             + _fmt_seconds(
                 row[
                     "max_seconds"
                 ]
             ).rjust(12)
+
             + f"{row['median_nodes']:,.0f}".rjust(
                 16
             )
         )
 
+    # --------------------------------------------------------
+    # Full Lucas pipeline
+    # --------------------------------------------------------
+
     print()
     print(
-        "PIPELINE SAMPLE"
+        "FULL LUCAS PIPELINE"
     )
 
-    pipeline = report[
-        "pipeline"
-    ]
+    print(
+        "  "
+        + "Depth".ljust(8)
+        + "Median".rjust(12)
+        + "P95".rjust(12)
+        + "Max".rjust(12)
+        + "2nd search".rjust(14)
+    )
 
-    print(
-        "  Depth         :",
-        pipeline[
-            "depth"
-        ],
-    )
-    print(
-        "  Median/move   :",
-        _fmt_seconds(
-            pipeline[
-                "median_seconds"
-            ]
-        ),
-    )
-    print(
-        "  P95/move      :",
-        _fmt_seconds(
-            pipeline[
-                "p95_seconds"
-            ]
-        ),
-    )
-    print(
-        "  Second search :",
-        (
-            f"{pipeline['second_search_rate'] * 100:.1f}%"
-        ),
-    )
+    for row in report[
+        "pipeline_benchmarks"
+    ]:
+        print(
+            "  "
+            + str(
+                row["depth"]
+            ).ljust(8)
+
+            + _fmt_seconds(
+                row[
+                    "median_seconds"
+                ]
+            ).rjust(12)
+
+            + _fmt_seconds(
+                row[
+                    "p95_seconds"
+                ]
+            ).rjust(12)
+
+            + _fmt_seconds(
+                row[
+                    "max_seconds"
+                ]
+            ).rjust(12)
+
+            + (
+                f"{row['second_search_rate'] * 100:.1f}%"
+            ).rjust(
+                14
+            )
+        )
+
+    # --------------------------------------------------------
+    # Capacity by depth
+    # --------------------------------------------------------
 
     print()
     print(
         "CAPACITY ESTIMATE"
     )
 
-    capacity = report[
-        "capacity_estimate"
-    ]
+    print(
+        "  "
+        + "Depth".ljust(8)
+        + "1 worker".rjust(14)
+        + "Workers".rjust(10)
+        + "Ideal parallel".rjust(18)
+    )
 
-    print(
-        "  Moves         :",
-        f"{capacity['tournament_moves']:,}",
-    )
-    print(
-        "  1 worker      :",
-        (
-            f"{capacity['one_worker_minutes']:.1f} min"
-        ),
-    )
-    print(
-        "  Worker guess  :",
-        capacity[
-            "suggested_workers"
-        ],
-    )
-    print(
-        "  Ideal parallel:",
-        (
-            f"{capacity['ideal_parallel_minutes']:.1f} min"
-        ),
-    )
+    for row in report[
+        "capacity_estimates"
+    ]:
+        print(
+            "  "
+            + str(
+                row["depth"]
+            ).ljust(8)
+
+            + (
+                f"{row['one_worker_minutes']:.1f}m"
+            ).rjust(
+                14
+            )
+
+            + str(
+                row[
+                    "suggested_workers"
+                ]
+            ).rjust(
+                10
+            )
+
+            + (
+                f"{row['ideal_parallel_minutes']:.1f}m"
+            ).rjust(
+                18
+            )
+        )
+
+    # --------------------------------------------------------
+    # Qualification result
+    # --------------------------------------------------------
 
     print()
     print(
@@ -1308,6 +1426,11 @@ def print_report(
     suggestion = report[
         "suggested_depth"
     ]
+
+    print(
+        "  Basis         :",
+        "full Lucas pipeline P95",
+    )
 
     print(
         "  P95 target    :",
@@ -1326,7 +1449,7 @@ def print_report(
         )
 
     print(
-        "=" * 72
+        "=" * 76
     )
 
 

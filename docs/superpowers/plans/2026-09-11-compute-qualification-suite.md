@@ -40,8 +40,10 @@ Test in `tests/test_benchmark.py`.
 
 Implement:
 - fixed-work nodes phase
-- depth 18/19/20 phase
-- Lucas-compatible pipeline phase
+- raw depth 18/19/20 phase
+- full Lucas-compatible pipeline at depth 18/19/20
+- production recommendation from full-pipeline P95, not raw search P95
+- per-depth tournament capacity estimates
 
 Use:
 - Threads=1
