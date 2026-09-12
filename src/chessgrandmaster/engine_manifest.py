@@ -96,6 +96,39 @@ def sha256_file(path):
     return h.hexdigest()
 
 
+def default_engine_install_path():
+    explicit = os.environ.get(
+        "CGM_ENGINE_INSTALL_PATH"
+    )
+
+    if explicit:
+        return Path(
+            explicit
+        ).expanduser().resolve()
+
+    cgm_home = os.environ.get(
+        "CGM_HOME"
+    )
+
+    if cgm_home:
+        return (
+            Path(cgm_home)
+            .expanduser()
+            .resolve()
+            / "bin"
+            / "stockfish"
+        )
+
+    return (
+        Path.home()
+        / ".local"
+        / "share"
+        / "chessgrandmaster"
+        / "bin"
+        / "stockfish"
+    ).resolve()
+
+
 def resolve_installed_engine(value=None):
     candidates = []
 
@@ -114,28 +147,25 @@ def resolve_installed_engine(value=None):
         )
 
     candidates.append(
-        "stockfish"
+        str(default_engine_install_path())
     )
+    candidates.append("stockfish")
 
     for candidate in candidates:
-        path = Path(
-            candidate
-        ).expanduser()
+        path = Path(candidate).expanduser()
 
         if path.is_file():
             return path.resolve()
 
-        found = shutil.which(
-            candidate
-        )
-
+        found = shutil.which(candidate)
         if found:
-            return Path(
-                found
-            ).resolve()
+            return Path(found).resolve()
 
     raise FileNotFoundError(
-        "Stockfish binary not found."
+        "Stockfish binary not found. "
+        "Pass an explicit path, set CGM_STOCKFISH, "
+        "run scripts/install_stockfish.sh, or install "
+        "stockfish in PATH."
     )
 
 
@@ -361,6 +391,11 @@ def cmd_verify(
     return 0
 
 
+def cmd_install_path():
+    print(default_engine_install_path())
+    return 0
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="cgm-engine",
@@ -392,6 +427,14 @@ def build_parser():
     )
 
     sub.add_parser(
+        "install-path",
+        help=(
+            "Print the managed rootless engine "
+            "installation path."
+        ),
+    )
+
+    sub.add_parser(
         "shell-install-spec",
         help=argparse.SUPPRESS,
     )
@@ -411,6 +454,9 @@ def main(argv=None):
         return cmd_verify(
             path=args.path,
         )
+
+    if args.command == "install-path":
+        return cmd_install_path()
 
     if args.command == "shell-install-spec":
         print_shell_install_spec()

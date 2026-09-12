@@ -14,7 +14,10 @@ import chess.pgn
 
 from .analyzer import TournamentAnalyzer
 from .pgn_export import LucasPGNExporter
-from .engine_manifest import verify_engine_binary
+from .engine_manifest import (
+    resolve_installed_engine,
+    verify_engine_binary,
+)
 
 
 PIPELINE_VERSION = 1
@@ -80,49 +83,8 @@ def default_workspace_root():
 
 
 def resolve_engine_binary(value=None):
-    """
-    Resolve Stockfish in this order:
-
-    1. Explicit argument
-    2. CGM_STOCKFISH environment variable
-    3. `stockfish` available in PATH
-    """
-
-    candidates = []
-
-    if value:
-        candidates.append(str(value))
-
-    env_value = os.environ.get("CGM_STOCKFISH")
-
-    if env_value:
-        candidates.append(env_value)
-
-
-    for candidate in candidates:
-
-        path = Path(candidate).expanduser()
-
-        if path.is_file():
-            return path.resolve()
-
-        found = shutil.which(candidate)
-
-        if found:
-            return Path(found).resolve()
-
-
-    found = shutil.which("stockfish")
-
-    if found:
-        return Path(found).resolve()
-
-
-    raise FileNotFoundError(
-        "Stockfish binary not found. "
-        "Pass engine_binary=..., set CGM_STOCKFISH, "
-        "or install stockfish in PATH."
-    )
+    """Resolve Stockfish through the canonical portable resolver."""
+    return resolve_installed_engine(value)
 
 
 # ============================================================
