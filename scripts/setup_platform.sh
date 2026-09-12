@@ -17,7 +17,19 @@ PY
 VENV="${CGM_VENV:-$ROOT/.venv}"
 if [[ ! -x "$VENV/bin/python" ]]; then
     echo "Creating virtual environment: $VENV"
-    "$BOOTSTRAP_PYTHON" -m venv "$VENV"
+
+    if ! "$BOOTSTRAP_PYTHON" -m venv "$VENV"; then
+        echo "Standard venv bootstrap failed; retrying without ensurepip."
+        rm -rf "$VENV"
+
+        "$BOOTSTRAP_PYTHON" -m venv --without-pip "$VENV"
+
+        "$BOOTSTRAP_PYTHON" \
+            -m pip \
+            --python "$VENV/bin/python" \
+            install \
+            --upgrade pip
+    fi
 fi
 PYTHON_BIN="$VENV/bin/python"
 CGM_ENGINE="$VENV/bin/cgm-engine"
