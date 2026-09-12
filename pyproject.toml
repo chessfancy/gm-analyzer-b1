@@ -15,7 +15,7 @@ dependencies = [
 [project.scripts]
 cgm-analyze = "chessgrandmaster.cli:main"
 cgm-engine = "chessgrandmaster.engine_manifest:main"
-cgm-bench = "chessgrandmaster.benchmark:main"
+cgm-bench = "chessgrandmaster.benchmark_cli:main"
 
 [project.optional-dependencies]
 dev = [
