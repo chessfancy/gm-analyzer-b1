@@ -241,6 +241,28 @@ def ensure_schema(db_path):
     );
 
 
+    CREATE TABLE IF NOT EXISTS engine_depth_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        analysis_id INTEGER NOT NULL,
+        source_search TEXT NOT NULL,
+        checkpoint_depth INTEGER NOT NULL,
+        reported_depth INTEGER NOT NULL,
+        uci TEXT,
+        cp INTEGER,
+        mate INTEGER,
+        wdl_wins INTEGER,
+        wdl_draws INTEGER,
+        wdl_losses INTEGER,
+        seldepth INTEGER,
+        nodes INTEGER,
+        nps INTEGER,
+        time_ms INTEGER,
+        pv_uci TEXT,
+        UNIQUE(analysis_id, source_search, checkpoint_depth),
+        FOREIGN KEY(analysis_id) REFERENCES move_analysis(id)
+    );
+
+
     CREATE INDEX IF NOT EXISTS idx_moves_game
         ON moves(game_id);
 
@@ -255,6 +277,10 @@ def ensure_schema(db_path):
 
     CREATE INDEX IF NOT EXISTS idx_er_analysis
         ON engine_responses(analysis_id);
+
+
+    CREATE INDEX IF NOT EXISTS idx_eds_analysis
+        ON engine_depth_snapshots(analysis_id);
     """)
 
     con.commit()

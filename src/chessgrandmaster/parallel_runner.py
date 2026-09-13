@@ -2,6 +2,7 @@
 import multiprocessing as mp
 import traceback
 from dataclasses import asdict
+from datetime import datetime, timezone
 
 from .engine_worker import LucasEngineWorker
 
@@ -24,6 +25,7 @@ def _worker_loop(
             depth=config["depth"],
             time_sec=config["time_sec"],
             nodes=config.get("nodes", 0),
+            snapshot_depths=config["snapshot_depths"],
         )
 
         while True:
@@ -33,11 +35,14 @@ def _worker_loop(
             if job is None:
                 break
 
+            started_at = datetime.now(timezone.utc).isoformat()
+
             try:
                 result = worker.analyze_move(
                     job["fen_before"],
                     job["played_uci"],
                 )
+                finished_at = datetime.now(timezone.utc).isoformat()
 
                 result_queue.put({
                     "ok": True,
@@ -47,6 +52,8 @@ def _worker_loop(
                     "ply": job.get("ply"),
                     "san": job.get("san"),
                     "played_uci": job["played_uci"],
+                    "started_at": started_at,
+                    "finished_at": finished_at,
 
                     "played_rank": result.played_rank,
                     "lucas_loss": result.lucas_loss,
@@ -58,9 +65,14 @@ def _worker_loop(
                         asdict(r)
                         for r in result.responses
                     ],
+                    "depth_snapshots": [
+                        asdict(snapshot)
+                        for snapshot in result.depth_snapshots
+                    ],
                 })
 
             except Exception as exc:
+                finished_at = datetime.now(timezone.utc).isoformat()
 
                 result_queue.put({
                     "ok": False,
@@ -68,6 +80,8 @@ def _worker_loop(
                     "job_id": job["job_id"],
                     "move_id": job.get("move_id"),
                     "ply": job.get("ply"),
+                    "started_at": started_at,
+                    "finished_at": finished_at,
                     "error": repr(exc),
                     "traceback": traceback.format_exc(),
                 })
@@ -89,6 +103,7 @@ class ParallelLucasRunner:
         depth=18,
         time_sec=3.0,
         nodes=0,
+        snapshot_depths=(12, 14, 16, 18, 19),
     ):
         self.engine_path = str(engine_path)
         self.num_workers = workers
@@ -100,6 +115,7 @@ class ParallelLucasRunner:
             "depth": depth,
             "time_sec": time_sec,
             "nodes": nodes,
+            "snapshot_depths": tuple(snapshot_depths),
         }
 
         # Deepnote/Linux:

@@ -22,6 +22,7 @@ class TournamentAnalyzer:
         time_sec=3.0,
         nodes=0,
         batch_size=20,
+        snapshot_depths=(12, 14, 16, 18, 19),
     ):
         self.db_path = str(db_path)
         self.engine_path = str(engine_path)
@@ -34,6 +35,7 @@ class TournamentAnalyzer:
         self.time_sec = time_sec
         self.nodes = nodes
         self.batch_size = batch_size
+        self.snapshot_depths = tuple(snapshot_depths)
 
 
     def _sha256_file(self, path):
@@ -62,6 +64,7 @@ class TournamentAnalyzer:
             "depth": self.depth,
             "time_ms": int(self.time_sec * 1000),
             "nodes": self.nodes,
+            "snapshot_depths": list(self.snapshot_depths),
             "scope": scope or {},
         }
 
@@ -83,9 +86,10 @@ class TournamentAnalyzer:
                 time_limit_ms,
                 depth_limit,
                 nodes_limit,
-                config_json
+                config_json,
+                created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             engine["name"],
             engine["version"],
@@ -94,13 +98,14 @@ class TournamentAnalyzer:
             self.threads,
             self.hash_mb,
             self.multipv,
-            int(self.time_sec * 1000),
+            int(self.time_sec * 1000) if self.time_sec else None,
             self.depth or None,
             self.nodes or None,
             json.dumps(
                 config,
                 ensure_ascii=False
             ),
+            datetime.now(timezone.utc).isoformat(),
         ))
 
         run_id = cur.lastrowid
@@ -222,11 +227,6 @@ class TournamentAnalyzer:
 
         for r in results:
 
-            now = datetime.now(
-                timezone.utc
-            ).isoformat()
-
-
             # ----------------------------------
             # Failed engine job
             # ----------------------------------
@@ -253,6 +253,11 @@ class TournamentAnalyzer:
                     """, (analysis_id,))
 
                     con.execute("""
+                        DELETE FROM engine_depth_snapshots
+                        WHERE analysis_id=?
+                    """, (analysis_id,))
+
+                    con.execute("""
                         UPDATE move_analysis
                         SET
                             status='failed',
@@ -260,10 +265,12 @@ class TournamentAnalyzer:
                             lucas_eval_loss=NULL,
                             category=NULL,
                             nag=NULL,
+                            started_at=?,
                             finished_at=?
                         WHERE id=?
                     """, (
-                        now,
+                        r["started_at"],
+                        r["finished_at"],
                         analysis_id,
                     ))
 
@@ -274,13 +281,15 @@ class TournamentAnalyzer:
                             run_id,
                             move_id,
                             status,
+                            started_at,
                             finished_at
                         )
-                        VALUES (?, ?, 'failed', ?)
+                        VALUES (?, ?, 'failed', ?, ?)
                     """, (
                         run_id,
                         r["move_id"],
-                        now,
+                        r["started_at"],
+                        r["finished_at"],
                     ))
 
                 failed += 1
@@ -314,6 +323,13 @@ class TournamentAnalyzer:
                 ))
 
                 con.execute("""
+                    DELETE FROM engine_depth_snapshots
+                    WHERE analysis_id=?
+                """, (
+                    analysis_id,
+                ))
+
+                con.execute("""
                     UPDATE move_analysis
                     SET
                         status='completed',
@@ -321,6 +337,7 @@ class TournamentAnalyzer:
                         lucas_eval_loss=?,
                         category=?,
                         nag=?,
+                        started_at=?,
                         finished_at=?
                     WHERE id=?
                 """, (
@@ -328,7 +345,8 @@ class TournamentAnalyzer:
                     r["lucas_loss"],
                     r["category"],
                     r["nag"],
-                    now,
+                    r["started_at"],
+                    r["finished_at"],
                     analysis_id,
                 ))
 
@@ -343,12 +361,13 @@ class TournamentAnalyzer:
                         lucas_eval_loss,
                         category,
                         nag,
+                        started_at,
                         finished_at
                     )
                     VALUES (
                         ?, ?,
                         'completed',
-                        ?, ?, ?, ?, ?
+                        ?, ?, ?, ?, ?, ?
                     )
                 """, (
                     run_id,
@@ -357,7 +376,8 @@ class TournamentAnalyzer:
                     r["lucas_loss"],
                     r["category"],
                     r["nag"],
-                    now,
+                    r["started_at"],
+                    r["finished_at"],
                 ))
 
                 analysis_id = cur.lastrowid
@@ -399,6 +419,48 @@ class TournamentAnalyzer:
                     response["nps"],
                     response["time_ms"],
                     response["pv_uci"],
+                ))
+
+            for snapshot in r["depth_snapshots"]:
+
+                con.execute("""
+                    INSERT INTO engine_depth_snapshots(
+                        analysis_id,
+                        source_search,
+                        checkpoint_depth,
+                        reported_depth,
+                        uci,
+                        cp,
+                        mate,
+                        wdl_wins,
+                        wdl_draws,
+                        wdl_losses,
+                        seldepth,
+                        nodes,
+                        nps,
+                        time_ms,
+                        pv_uci
+                    )
+                    VALUES (
+                        ?, ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?
+                    )
+                """, (
+                    analysis_id,
+                    snapshot["source_search"],
+                    snapshot["checkpoint_depth"],
+                    snapshot["reported_depth"],
+                    snapshot["uci"],
+                    snapshot["cp"],
+                    snapshot["mate"],
+                    snapshot["wdl_wins"],
+                    snapshot["wdl_draws"],
+                    snapshot["wdl_losses"],
+                    snapshot["seldepth"],
+                    snapshot["nodes"],
+                    snapshot["nps"],
+                    snapshot["time_ms"],
+                    snapshot["pv_uci"],
                 ))
 
             completed += 1
@@ -455,6 +517,7 @@ class TournamentAnalyzer:
             depth=self.depth,
             time_sec=self.time_sec,
             nodes=self.nodes,
+            snapshot_depths=self.snapshot_depths,
         ) as runner:
 
             for start in range(
