@@ -30,3 +30,9 @@ def test_molab_platform_probe_reuses_verified_engine_and_exports_json():
     assert "molab_platform.json" in text
     assert "hardware_info" in text
     assert "suggested_workers" in text
+
+
+def test_molab_analysis_uses_provider_worker_policy():
+    text = NOTEBOOK.read_text(encoding="utf-8")
+
+    assert '"--workers", "4"' in text
