@@ -295,14 +295,15 @@ class LucasEngineWorker:
                     aggregate = latest_infos.setdefault(multipv, {})
                     aggregate.update(info)
 
-                    if "score" not in aggregate:
+                    event_depth = info.get("depth")
+                    if "score" not in info or event_depth is None:
                         continue
 
                     if multipv != 1:
                         continue
 
                     snapshot_info = dict(aggregate)
-                    reported_depth = snapshot_info.get("depth", 0)
+                    reported_depth = event_depth
 
                     for checkpoint in active_depths:
                         if (

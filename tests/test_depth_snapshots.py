@@ -1,9 +1,11 @@
+import gzip
 import json
 
 import chess
 import chess.engine
 
 from chessgrandmaster.engine_worker import LucasEngineWorker
+from chessgrandmaster.uci_telemetry import UciEventArchive
 
 
 class FakeAnalysis:
@@ -265,6 +267,136 @@ def test_final_checkpoint_uses_latest_info_but_intermediate_keeps_first_crossing
     assert by_depth[19].time_ms == 210
     assert (by_depth[19].hashfull, by_depth[19].tbhits) == (210, 4)
     assert json.loads(by_depth[19].info_json)["nodes"] == 2100
+
+
+def test_currmove_only_events_cannot_capture_intermediate_checkpoints():
+    infos = [
+        _info(
+            depth=15,
+            score=chess.engine.PovScore(chess.engine.Cp(15), chess.WHITE),
+            wdl=chess.engine.PovWdl(chess.engine.Wdl(300, 500, 200), chess.WHITE),
+            pv=("e2e4", "e7e5"),
+            nodes=1500,
+            nps=7500,
+            time=0.15,
+        ),
+        {
+            "depth": 16,
+            "multipv": 1,
+            "currmove": chess.Move.from_uci("a2a3"),
+            "currmovenumber": 1,
+        },
+        _info(
+            depth=16,
+            score=chess.engine.PovScore(chess.engine.Cp(16), chess.WHITE),
+            wdl=chess.engine.PovWdl(chess.engine.Wdl(320, 480, 200), chess.WHITE),
+            pv=("d2d4", "d7d5"),
+            seldepth=20,
+            nodes=1600,
+            nps=8000,
+            time=0.16,
+            hashfull=160,
+            tbhits=2,
+        ),
+        _info(
+            depth=17,
+            score=chess.engine.PovScore(chess.engine.Cp(17), chess.WHITE),
+            wdl=chess.engine.PovWdl(chess.engine.Wdl(340, 470, 190), chess.WHITE),
+            pv=("g1f3", "g8f6"),
+            nodes=1700,
+            nps=8500,
+            time=0.17,
+        ),
+        {
+            "depth": 18,
+            "multipv": 1,
+            "currmove": chess.Move.from_uci("b1c3"),
+            "currmovenumber": 2,
+        },
+        _info(
+            depth=18,
+            score=chess.engine.PovScore(chess.engine.Cp(18), chess.WHITE),
+            wdl=chess.engine.PovWdl(chess.engine.Wdl(360, 460, 180), chess.WHITE),
+            pv=("c2c4", "e7e5"),
+            seldepth=22,
+            nodes=1800,
+            nps=9000,
+            time=0.18,
+            hashfull=180,
+            tbhits=3,
+        ),
+        _info(
+            depth=19,
+            score=chess.engine.PovScore(chess.engine.Cp(19), chess.WHITE),
+            wdl=chess.engine.PovWdl(chess.engine.Wdl(380, 450, 170), chess.WHITE),
+            pv=("g2g3", "d7d6"),
+            nodes=1900,
+            nps=9500,
+            time=0.19,
+        ),
+    ]
+    worker = _worker(infos, depth=19)
+    worker.snapshot_depths = (16, 18, 19)
+
+    _, snapshots = worker._stream_search(
+        chess.Board(), chess.WHITE, "primary"
+    )
+
+    by_depth = {snapshot.checkpoint_depth: snapshot for snapshot in snapshots}
+    assert by_depth[16].cp == 16
+    assert by_depth[16].pv_uci == "d2d4 d7d5"
+    assert (by_depth[16].nodes, by_depth[16].nps, by_depth[16].time_ms) == (
+        1600,
+        8000,
+        160,
+    )
+    assert by_depth[18].cp == 18
+    assert by_depth[18].pv_uci == "c2c4 e7e5"
+    assert (by_depth[18].nodes, by_depth[18].nps, by_depth[18].time_ms) == (
+        1800,
+        9000,
+        180,
+    )
+
+
+def test_currmove_only_events_remain_in_raw_gzip_archive(tmp_path):
+    path = tmp_path / "uci" / "worker.jsonl.gz"
+    archive = UciEventArchive(path, archive_root=tmp_path)
+    worker = _worker([
+        _info(
+            depth=15,
+            score=chess.engine.PovScore(chess.engine.Cp(15), chess.WHITE),
+            wdl=chess.engine.PovWdl(chess.engine.Wdl(300, 500, 200), chess.WHITE),
+            pv=("e2e4",),
+        ),
+        {
+            "depth": 16,
+            "multipv": 1,
+            "currmove": chess.Move.from_uci("a2a3"),
+            "currmovenumber": 1,
+        },
+        _info(
+            depth=16,
+            score=chess.engine.PovScore(chess.engine.Cp(16), chess.WHITE),
+            wdl=chess.engine.PovWdl(chess.engine.Wdl(320, 480, 200), chess.WHITE),
+            pv=("d2d4",),
+        ),
+    ], depth=16)
+    worker.snapshot_depths = (16,)
+    worker.archive = archive
+
+    worker._stream_search(chess.Board(), chess.WHITE, "primary")
+    archive.close()
+
+    with gzip.open(path, "rt", encoding="utf-8") as stream:
+        records = [json.loads(line) for line in stream]
+
+    assert any(
+        record["event"] == "info"
+        and record["info"].get("currmove") == "a2a3"
+        and record["info"].get("currmovenumber") == 1
+        for record in records
+    )
 
 
 def test_post_move_snapshots_use_original_mover_pov_and_prepended_move():
