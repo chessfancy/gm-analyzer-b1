@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,64 +41,27 @@ print(json.dumps(configured_engine()))
     assert data["output_tag"] == "SF19"
 
 
-def test_engine_verification_accepts_configured_uci_name(tmp_path):
+def test_engine_verification_accepts_configured_uci_name(tmp_path, monkeypatch):
+    from chessgrandmaster import engine_manifest
+
     engine = tmp_path / "stockfish"
+    engine.write_text("fixture", encoding="utf-8")
+    monkeypatch.setattr(engine_manifest, "probe_uci_name", lambda path: "Stockfish 19")
 
-    engine.write_text(
-        """#!/usr/bin/env bash
-cat >/dev/null
-printf 'id name Stockfish 19\\n'
-printf 'id author Test\\n'
-printf 'uciok\\n'
-""",
-        encoding="utf-8",
-    )
+    info = engine_manifest.verify_engine_binary(engine)
 
-    engine.chmod(0o755)
-
-    code = f"""
-from chessgrandmaster.engine_manifest import verify_engine_binary
-info = verify_engine_binary({str(engine)!r})
-assert info["uci_name"] == "Stockfish 19"
-print("OK")
-"""
-
-    result = run_python(code)
-
-    assert result.returncode == 0, result.stderr
-    assert "OK" in result.stdout
+    assert info["uci_name"] == "Stockfish 19"
 
 
-def test_engine_verification_rejects_wrong_version(tmp_path):
+def test_engine_verification_rejects_wrong_version(tmp_path, monkeypatch):
+    from chessgrandmaster import engine_manifest
+
     engine = tmp_path / "stockfish"
+    engine.write_text("fixture", encoding="utf-8")
+    monkeypatch.setattr(engine_manifest, "probe_uci_name", lambda path: "Stockfish 18")
 
-    engine.write_text(
-        """#!/usr/bin/env bash
-cat >/dev/null
-printf 'id name Stockfish 18\\n'
-printf 'id author Test\\n'
-printf 'uciok\\n'
-""",
-        encoding="utf-8",
-    )
-
-    engine.chmod(0o755)
-
-    code = f"""
-from chessgrandmaster.engine_manifest import verify_engine_binary
-
-try:
-    verify_engine_binary({str(engine)!r})
-except RuntimeError:
-    print("REJECTED")
-else:
-    raise SystemExit("wrong engine version was accepted")
-"""
-
-    result = run_python(code)
-
-    assert result.returncode == 0, result.stderr
-    assert "REJECTED" in result.stdout
+    with pytest.raises(RuntimeError, match="Wrong chess engine version"):
+        engine_manifest.verify_engine_binary(engine)
 
 
 def test_release_checksum_is_explicitly_archive_checksum():
