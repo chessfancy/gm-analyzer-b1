@@ -101,10 +101,13 @@ class ParallelLucasRunner:
         hash_mb=256,
         multipv=1,
         depth=18,
-        time_sec=3.0,
+        time_sec=0.0,
         nodes=0,
         snapshot_depths=(12, 14, 16, 18, 19),
     ):
+        if depth <= 0:
+            raise ValueError("depth must be positive")
+
         self.engine_path = str(engine_path)
         self.num_workers = workers
 

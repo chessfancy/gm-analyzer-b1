@@ -25,6 +25,8 @@ def test_cli_runs_pipeline_for_input_pgn(monkeypatch, tmp_path):
     assert rc == 0
     assert Path(called["pgn_input"]) == pgn
     assert called["kwargs"]["workers"] == 2
+    assert called["kwargs"]["hash_mb"] == 256
+    assert called["kwargs"]["depth"] == 18
 
 
 def test_cli_passes_workers_override_to_pipeline(monkeypatch, tmp_path):
@@ -46,8 +48,33 @@ def test_cli_passes_workers_override_to_pipeline(monkeypatch, tmp_path):
         fake_run_pipeline,
     )
 
-    rc = cli.main(["--workers", "4", str(pgn)])
+    rc = cli.main(
+        [
+            "--workers", "4",
+            "--hash-mb", "512",
+            "--depth", "19",
+            str(pgn),
+        ]
+    )
 
     assert rc == 0
     assert Path(called["pgn_input"]) == pgn
     assert called["kwargs"]["workers"] == 4
+    assert called["kwargs"]["hash_mb"] == 512
+    assert called["kwargs"]["depth"] == 19
+
+
+def test_cli_rejects_nonpositive_production_knobs(tmp_path):
+    from chessgrandmaster import cli
+
+    pgn = tmp_path / "tournament.pgn"
+    pgn.write_text('[Event "Test"]\n\n*\n', encoding="utf-8")
+
+    import pytest
+
+    for flag in ("--workers", "--hash-mb", "--depth"):
+        with pytest.raises(SystemExit):
+            cli.build_parser().parse_args([flag, "0", str(pgn)])
+
+        with pytest.raises(SystemExit):
+            cli.build_parser().parse_args([flag, "-1", str(pgn)])

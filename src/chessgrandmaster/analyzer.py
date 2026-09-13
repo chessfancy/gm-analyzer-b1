@@ -24,11 +24,14 @@ class TournamentAnalyzer:
         hash_mb=256,
         multipv=1,
         depth=18,
-        time_sec=3.0,
+        time_sec=0.0,
         nodes=0,
         batch_size=20,
         snapshot_depths=(12, 14, 16, 18, 19),
     ):
+        if depth <= 0:
+            raise ValueError("depth must be positive")
+
         self.db_path = str(db_path)
         self.engine_path = str(engine_path)
 
@@ -94,6 +97,8 @@ class TournamentAnalyzer:
             "multipv": self.multipv,
             "depth": self.depth,
             "time_ms": int(self.time_sec * 1000),
+            "time_sec": self.time_sec,
+            "depth_only": self.time_sec == 0.0,
             "nodes": self.nodes,
             "snapshot_depths": list(self.snapshot_depths),
             "scope": scope or {},

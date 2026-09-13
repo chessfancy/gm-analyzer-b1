@@ -13,6 +13,10 @@ class FakeAnalyzer:
         return 999
 
 
+def test_depth_only_policy_bumps_pipeline_version():
+    assert pp.PIPELINE_VERSION == 2
+
+
 def test_changed_engine_config_does_not_recover_old_run(tmp_path):
     db = tmp_path / "analysis.sqlite"
     pp.ensure_schema(db)
@@ -186,3 +190,76 @@ def test_same_engine_binary_at_different_path_recovers_run(tmp_path):
     assert created is False
     assert run_id == old_run_id
     assert analyzer.created == 0
+
+
+def test_legacy_depth18_time_limited_run_is_not_recovered_by_depth_only_policy(
+    tmp_path,
+):
+    db = tmp_path / "analysis.sqlite"
+    pp.ensure_schema(db)
+
+    source_sha = "legacy-depth18-time-limited"
+    con = sqlite3.connect(db)
+    con.execute(
+        """
+        INSERT INTO source_files(filename, sha256, game_count)
+        VALUES (?, ?, ?)
+        """,
+        ("games.pgn", source_sha, 1),
+    )
+    con.execute(
+        """
+        INSERT INTO analysis_runs(
+            workers, threads, hash_mb, multipv,
+            time_limit_ms, depth_limit, config_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            2,
+            1,
+            256,
+            1,
+            3000,
+            18,
+            json.dumps(
+                {
+                    "scope": {
+                        "purpose": "production_tournament_full",
+                        "pipeline_version": 1,
+                        "source_sha256": source_sha,
+                        "engine": {
+                            "workers": 2,
+                            "threads": 1,
+                            "hash_mb": 256,
+                            "multipv": 1,
+                            "depth": 18,
+                            "time_sec": 3.0,
+                        },
+                    },
+                }
+            ),
+        ),
+    )
+    con.commit()
+    con.close()
+
+    analyzer = FakeAnalyzer()
+    run_id, created = pp.find_or_create_run(
+        analyzer,
+        db,
+        source_sha,
+        {
+            "workers": 2,
+            "threads": 1,
+            "hash_mb": 256,
+            "multipv": 1,
+            "depth": 18,
+            "time_sec": 0.0,
+            "snapshot_depths": [12, 14, 16, 18, 19],
+        },
+    )
+
+    assert created is True
+    assert run_id == 999
+    assert analyzer.created == 1

@@ -21,7 +21,7 @@ from .engine_manifest import (
 )
 
 
-PIPELINE_VERSION = 1
+PIPELINE_VERSION = 2
 
 
 # ============================================================
@@ -752,6 +752,11 @@ def find_or_create_run(
         # Runtime path is not part of engine identity.
         binary = result.pop("binary", None)
 
+        if "snapshot_depths" in result:
+            result["snapshot_depths"] = list(
+                result["snapshot_depths"]
+            )
+
         # When the binary exists, identify it by content instead.
         if (
             binary
@@ -1221,8 +1226,12 @@ def run_pipeline(
     hash_mb=256,
     multipv=1,
     depth=18,
-    time_sec=3.0,
+    time_sec=0.0,
+    snapshot_depths=(12, 14, 16, 18, 19),
 ):
+    if depth <= 0:
+        raise ValueError("depth must be positive")
+
 
     root = (
         Path(root).expanduser().resolve()
@@ -1350,6 +1359,7 @@ def run_pipeline(
         multipv=multipv,
         depth=depth,
         time_sec=time_sec,
+        snapshot_depths=snapshot_depths,
         batch_size=100,
     )
 
@@ -1375,6 +1385,12 @@ def run_pipeline(
 
         "time_sec":
             time_sec,
+
+        "depth_only":
+            time_sec == 0.0,
+
+        "snapshot_depths":
+            list(snapshot_depths),
     }
 
 
