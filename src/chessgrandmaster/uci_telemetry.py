@@ -5,6 +5,7 @@ from __future__ import annotations
 import gzip
 import json
 import math
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -66,6 +67,14 @@ def _wdl_json(value):
     return None
 
 
+def _stable_unknown_value(value):
+    text = str(value)
+    default_prefix = f"<{type(value).__name__} object at 0x"
+    if text.startswith(default_prefix) and text.endswith(">"):
+        return f"<{_type_name(value)}>"
+    return re.sub(r"0x[0-9a-fA-F]+", "0x<address>", text)
+
+
 def to_json_safe(value):
     """Convert a python-chess engine value into deterministic JSON data."""
     if value is None or isinstance(value, (bool, int, str)):
@@ -124,7 +133,7 @@ def to_json_safe(value):
 
     return {
         "__type__": _type_name(value),
-        "value": str(value),
+        "value": _stable_unknown_value(value),
     }
 
 

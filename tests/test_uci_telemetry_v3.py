@@ -72,6 +72,16 @@ def test_uci_serializer_uses_deterministic_unknown_fallback():
     }
 
 
+def test_uci_serializer_sanitizes_default_object_addresses():
+    first = to_json_safe(object())
+    second = to_json_safe(object())
+
+    assert first == second == {
+        "__type__": "builtins.object",
+        "value": "<builtins.object>",
+    }
+
+
 def test_uci_event_archive_is_valid_gzip_jsonl_with_search_context(tmp_path):
     path = tmp_path / "uci" / "worker_0_session.jsonl.gz"
     archive = UciEventArchive(path, archive_root=tmp_path)
