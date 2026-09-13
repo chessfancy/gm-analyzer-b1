@@ -43,8 +43,9 @@ def _(mo):
         2. Optionally click **Export platform JSON** and upload
            `cgm_molab_data/molab_platform.json` for worker selection.
         3. Upload a PGN with Molab's file browser and paste its path below.
-        4. Click **Analyze PGN**. Results are written under
-           `cgm_molab_data/db` and `cgm_molab_data/output`.
+        4. Click **Analyze PGN**. Molab uses the provider policy of
+           **4 workers**, Threads=1 per worker, depth=18. Results are written
+           under `cgm_molab_data/db` and `cgm_molab_data/output`.
 
         Molab treats `/tmp` as scratch runtime. A fresh runtime needs setup
         again, while files uploaded through Molab's file browser can persist
@@ -341,7 +342,7 @@ def _(
         raise RuntimeError("B1 is not set up yet; click Setup / Reuse B1 first")
 
     subprocess.run(
-        [str(_analyzer), str(_input)],
+        [str(_analyzer), "--workers", "4", str(_input)],
         cwd=repo_dir,
         env=_env,
         check=True,
@@ -365,6 +366,11 @@ def _(
 
         **Input**
         - `{analysis_result['input']}`
+
+        **Policy**
+        - Workers: `4`
+        - Threads per worker: `1`
+        - Depth: `18`
 
         **SQLite database(s)**
         {_db_lines or '- none'}
