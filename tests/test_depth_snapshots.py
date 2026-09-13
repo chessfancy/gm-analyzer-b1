@@ -1,3 +1,5 @@
+import json
+
 import chess
 import chess.engine
 
@@ -189,6 +191,13 @@ def test_stream_search_accumulates_split_info_fields_by_multipv_rank():
         6000,
     )
     assert snapshot.time_ms == 200
+    info_json = json.loads(snapshot.info_json)
+    assert info_json["depth"] == 12
+    assert info_json["seldepth"] == 16
+    assert info_json["nodes"] == 1200
+    assert info_json["nps"] == 6000
+    assert info_json["time"] == 0.2
+    assert info_json["pv"] == ["e2e4", "e7e5"]
     assert responses[0].cp == 31
     assert responses[0].pv_uci == "e2e4 e7e5"
     assert (responses[0].nodes, responses[0].nps) == (1200, 6000)

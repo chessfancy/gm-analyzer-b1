@@ -4,6 +4,7 @@ import chess
 import chess.engine
 
 from . import lucas_eval
+from .uci_telemetry import info_to_json
 
 
 @dataclass
@@ -20,6 +21,12 @@ class EngineResponse:
     source_search: str
     is_played: bool = False
     rank: int = -1
+    hashfull: int | None = None
+    tbhits: int | None = None
+    info_json: str | None = None
+    execution_id: str | None = None
+    worker_id: int | None = None
+    engine_session_id: str | None = None
 
 
 @dataclass
@@ -38,6 +45,12 @@ class DepthSnapshot:
     nps: int
     time_ms: int
     pv_uci: str
+    hashfull: int | None = None
+    tbhits: int | None = None
+    info_json: str | None = None
+    execution_id: str | None = None
+    worker_id: int | None = None
+    engine_session_id: str | None = None
 
 
 @dataclass
@@ -83,6 +96,10 @@ class LucasEngineWorker:
         time_sec=0.0,
         nodes=0,
         snapshot_depths=(12, 14, 16, 18, 19),
+        execution_id=None,
+        worker_id=None,
+        engine_session_id=None,
+        archive=None,
     ):
         self.engine_path = str(engine_path)
 
@@ -94,6 +111,10 @@ class LucasEngineWorker:
         self.time_sec = time_sec
         self.nodes = nodes
         self.snapshot_depths = tuple(snapshot_depths)
+        self.execution_id = execution_id
+        self.worker_id = worker_id
+        self.engine_session_id = engine_session_id
+        self.archive = archive
 
         # Persistent Stockfish process.
         self.engine = chess.engine.SimpleEngine.popen_uci(
@@ -190,6 +211,9 @@ class LucasEngineWorker:
             time_ms=int(info.get("time", 0) * 1000),
             pv_uci=" ".join(m.uci() for m in pv),
             source_search=source_search,
+            hashfull=info.get("hashfull"),
+            tbhits=info.get("tbhits"),
+            info_json=info_to_json(info),
         )
 
 
@@ -228,6 +252,9 @@ class LucasEngineWorker:
             nps=response.nps,
             time_ms=response.time_ms,
             pv_uci=response.pv_uci,
+            hashfull=response.hashfull,
+            tbhits=response.tbhits,
+            info_json=response.info_json,
         )
 
 
@@ -238,45 +265,61 @@ class LucasEngineWorker:
         source_search,
         forced_first_move=None,
         search_depth=None,
+        game_token=None,
+        telemetry_context=None,
     ):
         latest_infos = {}
         snapshots = []
         captured_depths = set()
         active_depths = self._active_snapshot_depths(search_depth)
+        archive = getattr(self, "archive", None)
+        context = dict(telemetry_context or {})
+        context["source_search"] = source_search
 
-        with self.engine.analysis(
-            board,
-            self._limit(depth=search_depth),
-            multipv=self.multipv if forced_first_move is None else 1,
-            info=chess.engine.INFO_ALL,
-        ) as analysis:
-            for info in analysis:
-                multipv = info.get("multipv", 1)
-                aggregate = latest_infos.setdefault(multipv, {})
-                aggregate.update(info)
+        if archive is not None:
+            archive.write("search_start", context)
 
-                if "score" not in aggregate:
-                    continue
+        try:
+            with self.engine.analysis(
+                board,
+                self._limit(depth=search_depth),
+                multipv=self.multipv if forced_first_move is None else 1,
+                info=chess.engine.INFO_ALL,
+                game=game_token,
+            ) as analysis:
+                for info in analysis:
+                    if archive is not None:
+                        archive.write_info(context, info)
 
-                if multipv != 1:
-                    continue
+                    multipv = info.get("multipv", 1)
+                    aggregate = latest_infos.setdefault(multipv, {})
+                    aggregate.update(info)
 
-                snapshot_info = dict(aggregate)
-                reported_depth = snapshot_info.get("depth", 0)
+                    if "score" not in aggregate:
+                        continue
 
-                for checkpoint in active_depths:
-                    if (
-                        checkpoint not in captured_depths
-                        and reported_depth >= checkpoint
-                    ):
-                        snapshots.append(self._snapshot_from_info(
-                            snapshot_info,
-                            pov_color,
-                            source_search,
-                            checkpoint,
-                            forced_first_move=forced_first_move,
-                        ))
-                        captured_depths.add(checkpoint)
+                    if multipv != 1:
+                        continue
+
+                    snapshot_info = dict(aggregate)
+                    reported_depth = snapshot_info.get("depth", 0)
+
+                    for checkpoint in active_depths:
+                        if (
+                            checkpoint not in captured_depths
+                            and reported_depth >= checkpoint
+                        ):
+                            snapshots.append(self._snapshot_from_info(
+                                snapshot_info,
+                                pov_color,
+                                source_search,
+                                checkpoint,
+                                forced_first_move=forced_first_move,
+                            ))
+                            captured_depths.add(checkpoint)
+        finally:
+            if archive is not None:
+                archive.write("search_end", context)
 
         responses = [
             self._response_from_info(
@@ -291,7 +334,20 @@ class LucasEngineWorker:
         return responses, snapshots
 
 
-    def analyze_move(self, fen_before, played_uci):
+    def analyze_move(
+        self,
+        fen_before,
+        played_uci,
+        *,
+        game_token=None,
+        telemetry_context=None,
+    ):
+
+        if game_token is None:
+            game_token = getattr(self, "_implicit_game_token", None)
+            if game_token is None:
+                game_token = object()
+                self._implicit_game_token = game_token
 
         board = chess.Board(fen_before)
 
@@ -313,6 +369,8 @@ class LucasEngineWorker:
             board,
             pov_color,
             "primary",
+            game_token=game_token,
+            telemetry_context=telemetry_context,
         )
 
         played_response = None
@@ -354,6 +412,8 @@ class LucasEngineWorker:
                 "post_move",
                 forced_first_move=played_move,
                 search_depth=second_depth,
+                game_token=game_token,
+                telemetry_context=telemetry_context,
             )
 
             played_response = post_move_responses[0]
@@ -375,6 +435,35 @@ class LucasEngineWorker:
 
         for rank, response in enumerate(responses):
             response.rank = rank
+
+        context = telemetry_context or {}
+        for response in responses:
+            response.execution_id = context.get(
+                "execution_id",
+                getattr(self, "execution_id", None),
+            )
+            response.worker_id = context.get(
+                "worker_id",
+                getattr(self, "worker_id", None),
+            )
+            response.engine_session_id = context.get(
+                "engine_session_id",
+                getattr(self, "engine_session_id", None),
+            )
+
+        for snapshot in depth_snapshots:
+            snapshot.execution_id = context.get(
+                "execution_id",
+                getattr(self, "execution_id", None),
+            )
+            snapshot.worker_id = context.get(
+                "worker_id",
+                getattr(self, "worker_id", None),
+            )
+            snapshot.engine_session_id = context.get(
+                "engine_session_id",
+                getattr(self, "engine_session_id", None),
+            )
 
 
         played_rank = next(

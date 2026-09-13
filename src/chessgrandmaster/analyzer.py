@@ -4,6 +4,8 @@ import json
 import os
 import sqlite3
 from datetime import datetime, timezone
+from pathlib import Path
+from uuid import uuid4
 
 from .parallel_runner import ParallelLucasRunner
 from .engine_manifest import configured_engine
@@ -11,6 +13,17 @@ from .resource_telemetry import (
     collect_resource_sample,
     persist_resource_sample,
 )
+
+
+def _stored_info_json(value):
+    if value is None or isinstance(value, str):
+        return value
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 class TournamentAnalyzer:
@@ -28,6 +41,9 @@ class TournamentAnalyzer:
         nodes=0,
         batch_size=20,
         snapshot_depths=(12, 14, 16, 18, 19),
+        *,
+        archive_root=None,
+        archive_enabled=None,
     ):
         if depth <= 0:
             raise ValueError("depth must be positive")
@@ -44,6 +60,16 @@ class TournamentAnalyzer:
         self.nodes = nodes
         self.batch_size = batch_size
         self.snapshot_depths = tuple(snapshot_depths)
+        self.archive_root = (
+            Path(archive_root).resolve()
+            if archive_root is not None
+            else None
+        )
+        self.archive_enabled = (
+            self.archive_root is not None
+            if archive_enabled is None
+            else bool(archive_enabled)
+        )
 
 
     def _sha256_file(self, path):
@@ -91,6 +117,10 @@ class TournamentAnalyzer:
 
         config = {
             "engine": engine["label"],
+            "pipeline_version": (scope or {}).get("pipeline_version", 3),
+            "scheduler": "game_affinity_lpt",
+            "game_affinity": True,
+            "telemetry_archive": True,
             "workers": self.workers,
             "threads_per_worker": self.threads,
             "hash_mb_per_worker": self.hash_mb,
@@ -164,6 +194,7 @@ class TournamentAnalyzer:
         sql = """
             SELECT
                 m.id,
+                m.game_id,
                 g.source_game_index,
                 m.ply,
                 m.san,
@@ -229,6 +260,7 @@ class TournamentAnalyzer:
 
             (
                 move_id,
+                game_id,
                 game_no,
                 ply,
                 san,
@@ -239,6 +271,8 @@ class TournamentAnalyzer:
             jobs.append({
                 "job_id": job_id,
                 "move_id": move_id,
+                "game_id": game_id,
+                "source_game_index": game_no,
                 "game_index": game_no,
                 "ply": ply,
                 "san": san,
@@ -262,79 +296,9 @@ class TournamentAnalyzer:
         failed = 0
 
         for r in results:
-
-            # ----------------------------------
-            # Failed engine job
-            # ----------------------------------
-
-            if not r["ok"]:
-
-                existing = con.execute("""
-                    SELECT id
-                    FROM move_analysis
-                    WHERE run_id=?
-                      AND move_id=?
-                """, (
-                    run_id,
-                    r["move_id"],
-                )).fetchone()
-
-                if existing:
-
-                    analysis_id = existing[0]
-
-                    con.execute("""
-                        DELETE FROM engine_responses
-                        WHERE analysis_id=?
-                    """, (analysis_id,))
-
-                    con.execute("""
-                        DELETE FROM engine_depth_snapshots
-                        WHERE analysis_id=?
-                    """, (analysis_id,))
-
-                    con.execute("""
-                        UPDATE move_analysis
-                        SET
-                            status='failed',
-                            played_response_rank=NULL,
-                            lucas_eval_loss=NULL,
-                            category=NULL,
-                            nag=NULL,
-                            started_at=?,
-                            finished_at=?
-                        WHERE id=?
-                    """, (
-                        r["started_at"],
-                        r["finished_at"],
-                        analysis_id,
-                    ))
-
-                else:
-
-                    con.execute("""
-                        INSERT INTO move_analysis(
-                            run_id,
-                            move_id,
-                            status,
-                            started_at,
-                            finished_at
-                        )
-                        VALUES (?, ?, 'failed', ?, ?)
-                    """, (
-                        run_id,
-                        r["move_id"],
-                        r["started_at"],
-                        r["finished_at"],
-                    ))
-
-                failed += 1
-                continue
-
-
-            # ----------------------------------
-            # Successful job
-            # ----------------------------------
+            execution_id = r.get("execution_id")
+            worker_id = r.get("worker_id")
+            engine_session_id = r.get("engine_session_id")
 
             existing = con.execute("""
                 SELECT id
@@ -346,25 +310,67 @@ class TournamentAnalyzer:
                 r["move_id"],
             )).fetchone()
 
-
-            if existing:
-
-                analysis_id = existing[0]
-
+            analysis_id = existing[0] if existing else None
+            if analysis_id is not None:
                 con.execute("""
                     DELETE FROM engine_responses
                     WHERE analysis_id=?
-                """, (
-                    analysis_id,
-                ))
-
+                """, (analysis_id,))
                 con.execute("""
                     DELETE FROM engine_depth_snapshots
                     WHERE analysis_id=?
-                """, (
-                    analysis_id,
-                ))
+                """, (analysis_id,))
 
+            if not r["ok"]:
+                if analysis_id is not None:
+                    con.execute("""
+                        UPDATE move_analysis
+                        SET
+                            status='failed',
+                            played_response_rank=NULL,
+                            lucas_eval_loss=NULL,
+                            category=NULL,
+                            nag=NULL,
+                            started_at=?,
+                            finished_at=?,
+                            execution_id=?,
+                            worker_id=?,
+                            engine_session_id=?
+                        WHERE id=?
+                    """, (
+                        r.get("started_at"),
+                        r.get("finished_at"),
+                        execution_id,
+                        worker_id,
+                        engine_session_id,
+                        analysis_id,
+                    ))
+                else:
+                    con.execute("""
+                        INSERT INTO move_analysis(
+                            run_id,
+                            move_id,
+                            status,
+                            started_at,
+                            finished_at,
+                            execution_id,
+                            worker_id,
+                            engine_session_id
+                        )
+                        VALUES (?, ?, 'failed', ?, ?, ?, ?, ?)
+                    """, (
+                        run_id,
+                        r["move_id"],
+                        r.get("started_at"),
+                        r.get("finished_at"),
+                        execution_id,
+                        worker_id,
+                        engine_session_id,
+                    ))
+                failed += 1
+                continue
+
+            if analysis_id is not None:
                 con.execute("""
                     UPDATE move_analysis
                     SET
@@ -374,20 +380,24 @@ class TournamentAnalyzer:
                         category=?,
                         nag=?,
                         started_at=?,
-                        finished_at=?
+                        finished_at=?,
+                        execution_id=?,
+                        worker_id=?,
+                        engine_session_id=?
                     WHERE id=?
                 """, (
                     r["played_rank"],
                     r["lucas_loss"],
                     r["category"],
                     r["nag"],
-                    r["started_at"],
-                    r["finished_at"],
+                    r.get("started_at"),
+                    r.get("finished_at"),
+                    execution_id,
+                    worker_id,
+                    engine_session_id,
                     analysis_id,
                 ))
-
             else:
-
                 cur = con.execute("""
                     INSERT INTO move_analysis(
                         run_id,
@@ -398,12 +408,13 @@ class TournamentAnalyzer:
                         category,
                         nag,
                         started_at,
-                        finished_at
+                        finished_at,
+                        execution_id,
+                        worker_id,
+                        engine_session_id
                     )
                     VALUES (
-                        ?, ?,
-                        'completed',
-                        ?, ?, ?, ?, ?, ?
+                        ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?, ?
                     )
                 """, (
                     run_id,
@@ -412,91 +423,80 @@ class TournamentAnalyzer:
                     r["lucas_loss"],
                     r["category"],
                     r["nag"],
-                    r["started_at"],
-                    r["finished_at"],
+                    r.get("started_at"),
+                    r.get("finished_at"),
+                    execution_id,
+                    worker_id,
+                    engine_session_id,
                 ))
-
                 analysis_id = cur.lastrowid
 
+            def value(item, key):
+                return item[key] if key in item else r.get(key)
 
-            for response in r["responses"]:
-
+            for response in r.get("responses", []):
                 con.execute("""
                     INSERT INTO engine_responses(
-                        analysis_id,
-                        rank,
-                        is_played,
-                        source_search,
-                        uci,
-                        cp,
-                        mate,
-                        depth,
-                        seldepth,
-                        nodes,
-                        nps,
-                        time_ms,
-                        pv_uci
+                        analysis_id, rank, is_played, source_search,
+                        uci, cp, mate, depth, seldepth, nodes, nps,
+                        time_ms, pv_uci, hashfull, tbhits, info_json,
+                        execution_id, worker_id, engine_session_id
                     )
-                    VALUES (
-                        ?, ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?, ?
-                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     analysis_id,
-                    response["rank"],
-                    int(response["is_played"]),
-                    response["source_search"],
-                    response["uci"],
-                    response["cp"],
-                    response["mate"],
-                    response["depth"],
-                    response["seldepth"],
-                    response["nodes"],
-                    response["nps"],
-                    response["time_ms"],
-                    response["pv_uci"],
+                    response.get("rank"),
+                    int(response.get("is_played", False)),
+                    response.get("source_search"),
+                    response.get("uci"),
+                    response.get("cp"),
+                    response.get("mate"),
+                    response.get("depth"),
+                    response.get("seldepth"),
+                    response.get("nodes"),
+                    response.get("nps"),
+                    response.get("time_ms"),
+                    response.get("pv_uci"),
+                    response.get("hashfull"),
+                    response.get("tbhits"),
+                    _stored_info_json(response.get("info_json")),
+                    value(response, "execution_id"),
+                    value(response, "worker_id"),
+                    value(response, "engine_session_id"),
                 ))
 
-            for snapshot in r["depth_snapshots"]:
-
+            for snapshot in r.get("depth_snapshots", []):
                 con.execute("""
                     INSERT INTO engine_depth_snapshots(
-                        analysis_id,
-                        source_search,
-                        checkpoint_depth,
-                        reported_depth,
-                        uci,
-                        cp,
-                        mate,
-                        wdl_wins,
-                        wdl_draws,
-                        wdl_losses,
-                        seldepth,
-                        nodes,
-                        nps,
-                        time_ms,
-                        pv_uci
+                        analysis_id, source_search, checkpoint_depth,
+                        reported_depth, uci, cp, mate, wdl_wins,
+                        wdl_draws, wdl_losses, seldepth, nodes, nps,
+                        time_ms, pv_uci, hashfull, tbhits, info_json,
+                        execution_id, worker_id, engine_session_id
                     )
-                    VALUES (
-                        ?, ?, ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?, ?, ?
-                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     analysis_id,
-                    snapshot["source_search"],
-                    snapshot["checkpoint_depth"],
-                    snapshot["reported_depth"],
-                    snapshot["uci"],
-                    snapshot["cp"],
-                    snapshot["mate"],
-                    snapshot["wdl_wins"],
-                    snapshot["wdl_draws"],
-                    snapshot["wdl_losses"],
-                    snapshot["seldepth"],
-                    snapshot["nodes"],
-                    snapshot["nps"],
-                    snapshot["time_ms"],
-                    snapshot["pv_uci"],
+                    snapshot.get("source_search"),
+                    snapshot.get("checkpoint_depth"),
+                    snapshot.get("reported_depth"),
+                    snapshot.get("uci"),
+                    snapshot.get("cp"),
+                    snapshot.get("mate"),
+                    snapshot.get("wdl_wins"),
+                    snapshot.get("wdl_draws"),
+                    snapshot.get("wdl_losses"),
+                    snapshot.get("seldepth"),
+                    snapshot.get("nodes"),
+                    snapshot.get("nps"),
+                    snapshot.get("time_ms"),
+                    snapshot.get("pv_uci"),
+                    snapshot.get("hashfull"),
+                    snapshot.get("tbhits"),
+                    _stored_info_json(snapshot.get("info_json")),
+                    value(snapshot, "execution_id"),
+                    value(snapshot, "worker_id"),
+                    value(snapshot, "engine_session_id"),
                 ))
 
             completed += 1
@@ -508,6 +508,59 @@ class TournamentAnalyzer:
         con.close()
 
         return completed, failed
+
+
+    def _persist_archive_manifests(self, run_id, manifests):
+        if not manifests:
+            return
+
+        con = sqlite3.connect(self.db_path)
+        try:
+            for manifest in manifests:
+                if self.archive_enabled:
+                    if self.archive_root is None:
+                        raise RuntimeError("UCI archive root is not configured")
+                    archive_path = self.archive_root / manifest["relative_path"]
+                    if not archive_path.is_file():
+                        raise RuntimeError(
+                            f"UCI archive missing: {archive_path}"
+                        )
+                    if manifest.get("compression") != "gzip":
+                        raise RuntimeError(
+                            "Unsupported UCI archive compression: "
+                            f"{manifest.get('compression')}"
+                        )
+                    if manifest.get("closed_at") is None:
+                        raise RuntimeError(
+                            f"UCI archive was not closed: {archive_path}"
+                        )
+                con.execute("""
+                    INSERT OR IGNORE INTO uci_event_archives(
+                        run_id,
+                        execution_id,
+                        worker_id,
+                        engine_session_id,
+                        relative_path,
+                        compression,
+                        event_count,
+                        created_at,
+                        closed_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    run_id,
+                    manifest["execution_id"],
+                    manifest["worker_id"],
+                    manifest["engine_session_id"],
+                    manifest["relative_path"],
+                    manifest["compression"],
+                    manifest["event_count"],
+                    manifest.get("created_at"),
+                    manifest.get("closed_at"),
+                ))
+            con.commit()
+        finally:
+            con.close()
 
 
     def analyze(
@@ -528,6 +581,7 @@ class TournamentAnalyzer:
         )
 
         total = len(jobs)
+        execution_id = str(uuid4())
 
         if total == 0:
             print("Nothing pending.")
@@ -535,6 +589,8 @@ class TournamentAnalyzer:
                 "completed": 0,
                 "failed": 0,
                 "pending_start": 0,
+                "execution_id": execution_id,
+                "archive_manifests": [],
             }
 
 
@@ -542,6 +598,8 @@ class TournamentAnalyzer:
 
         completed_total = 0
         failed_total = 0
+        processed_total = 0
+        result_buffer = []
 
 
         with ParallelLucasRunner(
@@ -554,6 +612,10 @@ class TournamentAnalyzer:
             time_sec=self.time_sec,
             nodes=self.nodes,
             snapshot_depths=self.snapshot_depths,
+            run_id=run_id,
+            execution_id=execution_id,
+            archive_root=self.archive_root,
+            archive_enabled=self.archive_enabled,
         ) as runner:
 
             root_pid = os.getpid()
@@ -564,62 +626,75 @@ class TournamentAnalyzer:
                 total_positions=total,
             )
 
-            for start in range(
-                0,
-                total,
-                self.batch_size,
-            ):
+            for result in runner.iter_analyze(jobs):
+                result_buffer.append(result)
 
-                batch = jobs[
-                    start:
-                    start + self.batch_size
-                ]
+                if len(result_buffer) < self.batch_size:
+                    continue
 
-                # job_id only needs to be unique
-                # within this runner call.
-                results = runner.analyze(batch)
-
-                completed, failed = (
-                    self._write_results(
-                        run_id,
-                        results,
-                    )
+                completed, failed = self._write_results(
+                    run_id,
+                    result_buffer,
                 )
-
+                result_buffer = []
                 completed_total += completed
                 failed_total += failed
-
-                done = min(
-                    start + len(batch),
-                    total
-                )
+                processed_total += completed + failed
 
                 self._sample_resources(
                     run_id,
                     root_pid,
-                    completed_positions=done,
+                    completed_positions=processed_total,
                     total_positions=total,
                 )
 
                 print(
-                    f"Checkpoint "
-                    f"{done}/{total} | "
-                    f"completed={completed_total} "
-                    f"failed={failed_total}"
+                    f"Checkpoint {processed_total}/{total} | "
+                    f"completed={completed_total} failed={failed_total}"
+                )
+
+            if result_buffer:
+                completed, failed = self._write_results(
+                    run_id,
+                    result_buffer,
+                )
+                completed_total += completed
+                failed_total += failed
+                processed_total += completed + failed
+
+                self._sample_resources(
+                    run_id,
+                    root_pid,
+                    completed_positions=processed_total,
+                    total_positions=total,
+                )
+
+                print(
+                    f"Checkpoint {processed_total}/{total} | "
+                    f"completed={completed_total} failed={failed_total}"
                 )
 
             self._sample_resources(
                 run_id,
                 root_pid,
-                completed_positions=total,
+                completed_positions=processed_total,
                 total_positions=total,
             )
+
+            archive_manifests = list(runner.archive_manifests)
+
+        self._persist_archive_manifests(
+            run_id,
+            archive_manifests,
+        )
 
 
         return {
             "completed": completed_total,
             "failed": failed_total,
             "pending_start": total,
+            "execution_id": execution_id,
+            "archive_manifests": archive_manifests,
         }
 
 
