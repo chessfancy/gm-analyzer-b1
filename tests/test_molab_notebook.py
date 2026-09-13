@@ -36,3 +36,55 @@ def test_molab_analysis_uses_provider_worker_policy():
     text = NOTEBOOK.read_text(encoding="utf-8")
 
     assert '"--workers", "4"' in text
+
+
+def test_molab_analysis_uses_depth_19_hash_and_snapshot_policy():
+    text = NOTEBOOK.read_text(encoding="utf-8")
+    tree = ast.parse(text)
+
+    def argument_value(node):
+        if isinstance(node, ast.Constant):
+            return node.value
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "str"
+            and len(node.args) == 1
+            and isinstance(node.args[0], ast.Name)
+        ):
+            return f"str({node.args[0].id})"
+        return None
+
+    expected_command = [
+        "str(_analyzer)",
+        "--workers",
+        "4",
+        "--hash-mb",
+        "512",
+        "--depth",
+        "19",
+        "str(_input)",
+    ]
+    matching_commands = []
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "subprocess"
+            and node.func.attr == "run"
+            and node.args
+            and isinstance(node.args[0], ast.List)
+        ):
+            continue
+        command = [argument_value(element) for element in node.args[0].elts]
+        if command == expected_command:
+            matching_commands.append(command)
+
+    assert matching_commands == [expected_command]
+    assert "Workers: 4" in text
+    assert "Threads/worker: 1" in text
+    assert "Hash/worker: 512 MB" in text
+    assert "Depth: 19" in text
+    assert "Time limit: OFF" in text
+    assert "Snapshot depths: 12, 14, 16, 18, 19" in text
