@@ -321,6 +321,28 @@ class LucasEngineWorker:
             if archive is not None:
                 archive.write("search_end", context)
 
+        final_checkpoint = active_depths[-1] if active_depths else None
+        final_info = latest_infos.get(1)
+        if (
+            final_checkpoint is not None
+            and final_info is not None
+            and final_info.get("depth") == final_checkpoint
+        ):
+            finalized_snapshot = self._snapshot_from_info(
+                dict(final_info),
+                pov_color,
+                source_search,
+                final_checkpoint,
+                forced_first_move=forced_first_move,
+            )
+            for index, snapshot in enumerate(snapshots):
+                if snapshot.checkpoint_depth == final_checkpoint:
+                    snapshots[index] = finalized_snapshot
+                    break
+            else:
+                snapshots.append(finalized_snapshot)
+                snapshots.sort(key=lambda snapshot: snapshot.checkpoint_depth)
+
         responses = [
             self._response_from_info(
                 dict(latest_infos[multipv]),

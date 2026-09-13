@@ -65,8 +65,10 @@ def _info(
     nodes=0,
     nps=0,
     time=0.0,
+    hashfull=None,
+    tbhits=None,
 ):
-    return {
+    info = {
         "depth": depth,
         "seldepth": seldepth,
         "multipv": multipv,
@@ -77,6 +79,11 @@ def _info(
         "time": time,
         "pv": [chess.Move.from_uci(uci) for uci in pv],
     }
+    if hashfull is not None:
+        info["hashfull"] = hashfull
+    if tbhits is not None:
+        info["tbhits"] = tbhits
+    return info
 
 
 def test_depth_only_limit_omits_time():
@@ -203,6 +210,63 @@ def test_stream_search_accumulates_split_info_fields_by_multipv_rank():
     assert (responses[0].nodes, responses[0].nps) == (1200, 6000)
 
 
+def test_final_checkpoint_uses_latest_info_but_intermediate_keeps_first_crossing():
+    depth_18 = _info(
+        depth=18,
+        score=chess.engine.PovScore(chess.engine.Cp(18), chess.WHITE),
+        wdl=chess.engine.PovWdl(chess.engine.Wdl(300, 500, 200), chess.WHITE),
+        pv=("d2d4", "d7d5"),
+        seldepth=22,
+        nodes=1800,
+        nps=9000,
+        time=0.18,
+        hashfull=180,
+        tbhits=1,
+    )
+    depth_19_a = _info(
+        depth=19,
+        score=chess.engine.PovScore(chess.engine.Cp(30), chess.WHITE),
+        wdl=chess.engine.PovWdl(chess.engine.Wdl(320, 480, 200), chess.WHITE),
+        pv=("g1f3", "g8f6"),
+        seldepth=24,
+        nodes=1900,
+        nps=9500,
+        time=0.19,
+        hashfull=190,
+        tbhits=2,
+    )
+    depth_19_b = _info(
+        depth=19,
+        score=chess.engine.PovScore(chess.engine.Cp(45), chess.WHITE),
+        wdl=chess.engine.PovWdl(chess.engine.Wdl(410, 390, 200), chess.WHITE),
+        pv=("c2c4", "e7e5"),
+        seldepth=27,
+        nodes=2100,
+        nps=10500,
+        time=0.21,
+        hashfull=210,
+        tbhits=4,
+    )
+    worker = _worker([depth_18, depth_19_a, depth_19_b], depth=19)
+
+    responses, snapshots = worker._stream_search(
+        chess.Board(), chess.WHITE, "primary"
+    )
+
+    by_depth = {snapshot.checkpoint_depth: snapshot for snapshot in snapshots}
+    assert by_depth[18].cp == 18
+    assert by_depth[18].pv_uci == "d2d4 d7d5"
+    assert by_depth[19].cp == responses[0].cp == 45
+    assert by_depth[19].mate == responses[0].mate == 0
+    assert by_depth[19].uci == responses[0].uci == "c2c4"
+    assert by_depth[19].pv_uci == responses[0].pv_uci == "c2c4 e7e5"
+    assert (by_depth[19].wdl_wins, by_depth[19].wdl_draws, by_depth[19].wdl_losses) == (410, 390, 200)
+    assert (by_depth[19].seldepth, by_depth[19].nodes, by_depth[19].nps) == (27, 2100, 10500)
+    assert by_depth[19].time_ms == 210
+    assert (by_depth[19].hashfull, by_depth[19].tbhits) == (210, 4)
+    assert json.loads(by_depth[19].info_json)["nodes"] == 2100
+
+
 def test_post_move_snapshots_use_original_mover_pov_and_prepended_move():
     infos = [
         _info(
@@ -245,6 +309,52 @@ def test_post_move_snapshots_use_original_mover_pov_and_prepended_move():
     assert snapshots[1].wdl_losses == 5
     assert responses[0].uci == "e2e4"
     assert responses[0].mate == 4
+
+
+def test_post_move_final_checkpoint_uses_latest_accumulated_info():
+    played_move = chess.Move.from_uci("e2e4")
+    board_after = chess.Board()
+    board_after.push(played_move)
+    infos = [
+        _info(
+            depth=18,
+            score=chess.engine.PovScore(chess.engine.Cp(-42), chess.BLACK),
+            wdl=chess.engine.PovWdl(chess.engine.Wdl(120, 300, 580), chess.BLACK),
+            pv=("e7e5", "g1f3"),
+            nodes=1800,
+        ),
+        _info(
+            depth=19,
+            score=chess.engine.PovScore(chess.engine.Cp(-30), chess.BLACK),
+            wdl=chess.engine.PovWdl(chess.engine.Wdl(160, 300, 540), chess.BLACK),
+            pv=("e7e5", "g1f3"),
+            nodes=1900,
+        ),
+        _info(
+            depth=19,
+            score=chess.engine.PovScore(chess.engine.Cp(-45), chess.BLACK),
+            wdl=chess.engine.PovWdl(chess.engine.Wdl(200, 300, 500), chess.BLACK),
+            pv=("c7c5", "g1f3"),
+            nodes=2100,
+        ),
+    ]
+    worker = _worker(infos, depth=19)
+
+    responses, snapshots = worker._stream_search(
+        board_after,
+        chess.WHITE,
+        "post_move",
+        forced_first_move=played_move,
+    )
+
+    by_depth = {snapshot.checkpoint_depth: snapshot for snapshot in snapshots}
+    assert by_depth[18].cp == 42
+    assert by_depth[18].pv_uci == "e2e4 e7e5 g1f3"
+    assert by_depth[19].cp == responses[0].cp == 45
+    assert by_depth[19].uci == responses[0].uci == "e2e4"
+    assert by_depth[19].pv_uci == responses[0].pv_uci == "e2e4 c7c5 g1f3"
+    assert (by_depth[19].wdl_wins, by_depth[19].wdl_draws, by_depth[19].wdl_losses) == (500, 300, 200)
+    assert by_depth[19].nodes == 2100
 
 
 def test_time_only_post_move_search_targets_primary_depth_minus_one():

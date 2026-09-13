@@ -1077,6 +1077,7 @@ def execution_audit(
     db_path,
     run_id,
     execution_id,
+    archive_root=None,
 ):
     """Report provenance and parsed-telemetry coverage for one execution."""
     con = sqlite3.connect(db_path)
@@ -1095,12 +1096,48 @@ def execution_audit(
             (run_id, execution_id),
         ).fetchall()
 
-        archive_files, archived_events = con.execute(
+        archive_files, archived_events, archives_not_closed = con.execute(
             """
-            SELECT COUNT(*), COALESCE(SUM(event_count), 0)
+            SELECT
+                COUNT(*),
+                COALESCE(SUM(event_count), 0),
+                COALESCE(SUM(
+                    CASE
+                    WHEN closed_at IS NULL OR closed_at='' THEN 1
+                    ELSE 0
+                    END
+                ), 0)
             FROM uci_event_archives
             WHERE run_id=?
               AND execution_id=?
+            """,
+            (run_id, execution_id),
+        ).fetchone()
+
+        response_count, response_info_missing, final_response_info_missing = con.execute(
+            """
+            SELECT
+                COUNT(*),
+                COALESCE(SUM(
+                    CASE
+                    WHEN er.info_json IS NULL OR er.info_json='' THEN 1
+                    ELSE 0
+                    END
+                ), 0),
+                COALESCE(SUM(
+                    CASE
+                    WHEN er.source_search='primary'
+                     AND (er.info_json IS NULL OR er.info_json='')
+                    THEN 1
+                    ELSE 0
+                    END
+                ), 0)
+            FROM engine_responses er
+            JOIN move_analysis ma
+              ON ma.id=er.analysis_id
+            WHERE ma.run_id=?
+              AND ma.execution_id=?
+              AND ma.status='completed'
             """,
             (run_id, execution_id),
         ).fetchone()
@@ -1119,6 +1156,27 @@ def execution_audit(
         ).fetchone()
     finally:
         con.close()
+
+    archives_not_persisted = 0
+    if archive_root is not None:
+        archive_root = Path(archive_root)
+        con = sqlite3.connect(db_path)
+        try:
+            archive_paths = con.execute(
+                """
+                SELECT relative_path
+                FROM uci_event_archives
+                WHERE run_id=?
+                  AND execution_id=?
+                """,
+                (run_id, execution_id),
+            ).fetchall()
+        finally:
+            con.close()
+        archives_not_persisted = sum(
+            not (archive_root / relative_path).is_file()
+            for (relative_path,) in archive_paths
+        )
 
     workers_used = {
         worker_id
@@ -1155,6 +1213,11 @@ def execution_audit(
         "affinity_violation_games": violating_games,
         "uci_archive_files": archive_files or 0,
         "archived_info_event_count": archived_events or 0,
+        "uci_archives_not_closed": archives_not_closed or 0,
+        "uci_archives_not_persisted": archives_not_persisted,
+        "engine_responses": response_count or 0,
+        "engine_responses_info_json_missing": response_info_missing or 0,
+        "final_response_info_json_missing": final_response_info_missing or 0,
         "snapshots_info_json_missing": info_missing or 0,
         "snapshots_hashfull_available": hashfull_available or 0,
         "snapshots_tbhits_available": tbhits_available or 0,
@@ -1379,7 +1442,12 @@ def snapshot_audit(
             LEFT JOIN engine_responses er
               ON er.analysis_id=ma.id
              AND er.source_search='primary'
-             AND er.rank=0
+             AND er.id=(
+                 SELECT MIN(primary_er.id)
+                 FROM engine_responses primary_er
+                 WHERE primary_er.analysis_id=ma.id
+                   AND primary_er.source_search='primary'
+             )
             WHERE ma.run_id=?
               AND ma.status='completed'
             ORDER BY ma.id
@@ -1396,8 +1464,14 @@ def snapshot_audit(
 
     final_mismatches = 0
     final_snapshot_missing = 0
+    final_response_missing = 0
 
     for analysis_id, final_depth, final_cp, final_mate, final_uci, final_pv in final_rows:
+        if final_depth is None:
+            final_response_missing += 1
+            final_mismatches += 1
+            continue
+
         if final_depth not in expected:
             continue
 
@@ -1435,6 +1509,7 @@ def snapshot_audit(
             len(post_move_ids) * len(expected) - post_move_missing,
         "post_move_missing": post_move_missing,
         "final_checked": len(final_rows),
+        "final_response_missing": final_response_missing,
         "final_snapshot_missing": final_snapshot_missing,
         "final_mismatches": final_mismatches,
     }
@@ -1832,6 +1907,7 @@ def run_pipeline(
         db_path,
         run_id,
         analysis_result.get("execution_id"),
+        archive_root=root,
     )
 
     print()
@@ -1843,6 +1919,10 @@ def run_pipeline(
     print("Affinity violations   :", execution_report["affinity_violations"])
     print("UCI archive files     :", execution_report["uci_archive_files"])
     print("Archived INFO events  :", execution_report["archived_info_event_count"])
+    print("UCI archives not closed:", execution_report.get("uci_archives_not_closed", 0))
+    print("UCI archives not persisted:", execution_report.get("uci_archives_not_persisted", 0))
+    print("Engine responses missing JSON:", execution_report.get("engine_responses_info_json_missing", 0))
+    print("Final responses missing JSON:", execution_report.get("final_response_info_json_missing", 0))
     print("Snapshots missing JSON:", execution_report["snapshots_info_json_missing"])
     print("Snapshots with hashfull:", execution_report["snapshots_hashfull_available"])
     print("Snapshots with tbhits:", execution_report["snapshots_tbhits_available"])
@@ -1855,6 +1935,41 @@ def run_pipeline(
             "Required snapshot info_json missing: "
             f"{execution_report['snapshots_info_json_missing']}"
         )
+
+    if (
+        analysis_result.get("execution_id") is not None
+        and (
+            execution_report.get("engine_responses_info_json_missing", 0) != 0
+            or execution_report.get("final_response_info_json_missing", 0) != 0
+        )
+    ):
+        raise RuntimeError(
+            "Required engine response info_json missing: "
+            f"{execution_report.get('engine_responses_info_json_missing', 0)} "
+            f"(final={execution_report.get('final_response_info_json_missing', 0)})"
+        )
+
+    analyzed_jobs = (
+        analysis_result.get("completed", 0)
+        + analysis_result.get("failed", 0)
+    )
+    if analysis_result.get("execution_id") is not None and analyzed_jobs:
+        if execution_report["affinity_violations"] != 0:
+            raise RuntimeError(
+                "Execution affinity audit failed: "
+                f"{execution_report['affinity_violations']} violations"
+            )
+
+        if (
+            execution_report["uci_archive_files"] != workers
+            or execution_report.get("uci_archives_not_closed", 0) != 0
+            or execution_report.get("uci_archives_not_persisted", 0) != 0
+        ):
+            raise RuntimeError(
+                "UCI archive audit failed: "
+                f"expected {workers} closed archives, report="
+                f"{execution_report}"
+            )
 
     resource_audit = resource_summary(
         db_path,
@@ -2001,6 +2116,7 @@ def run_pipeline(
     if (
         snapshot_audit_result["primary_missing"] != 0
         or snapshot_audit_result["post_move_missing"] != 0
+        or snapshot_audit_result.get("final_response_missing", 0) != 0
         or snapshot_audit_result["final_mismatches"] != 0
     ):
         raise RuntimeError(
