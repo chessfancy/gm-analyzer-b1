@@ -14,6 +14,13 @@ def build_parser():
     )
 
     parser.add_argument(
+        "--workers",
+        type=int,
+        default=2,
+        help="Parallel Stockfish workers (default: 2)",
+    )
+
+    parser.add_argument(
         "pgn",
         type=Path,
         help="Input PGN file",
@@ -26,7 +33,10 @@ def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    run_pipeline(args.pgn)
+    run_pipeline(
+        args.pgn,
+        workers=args.workers,
+    )
 
     return 0
 
