@@ -12,7 +12,15 @@ ensure_schema = production_pipeline.ensure_schema
 EXPECTED_DEPTHS = (12, 14, 16, 18, 19)
 
 
-def _fixture(tmp_path, *, missing_primary=(), missing_post=(), final_mismatch=False):
+def _fixture(
+    tmp_path,
+    *,
+    missing_primary=(),
+    missing_post=(),
+    final_mismatch=False,
+    final_depth=19,
+    snapshot_depths=EXPECTED_DEPTHS,
+):
     db_path = tmp_path / "analysis.sqlite"
     ensure_schema(db_path)
 
@@ -48,7 +56,7 @@ def _fixture(tmp_path, *, missing_primary=(), missing_post=(), final_mismatch=Fa
         (run_id, move_id),
     ).lastrowid
 
-    for depth in EXPECTED_DEPTHS:
+    for depth in snapshot_depths:
         if depth not in missing_primary:
             con.execute(
                 """
@@ -71,13 +79,13 @@ def _fixture(tmp_path, *, missing_primary=(), missing_post=(), final_mismatch=Fa
             "e2e4",
             25 if not final_mismatch else 30,
             0,
-            19,
+            final_depth,
             "e2e4 e7e5",
         ),
     )
 
     if missing_post is not None:
-        for depth in EXPECTED_DEPTHS:
+        for depth in snapshot_depths:
             if depth not in missing_post:
                 con.execute(
                     """
@@ -92,9 +100,9 @@ def _fixture(tmp_path, *, missing_primary=(), missing_post=(), final_mismatch=Fa
             """
             INSERT INTO engine_responses(
                 analysis_id, rank, source_search, uci, cp, mate, depth, pv_uci
-            ) VALUES (?, 0, 'post_move', 'e2e4', 10, 0, 19, 'e2e4 e7e5')
+            ) VALUES (?, 0, 'post_move', 'e2e4', 10, 0, ?, 'e2e4 e7e5')
             """,
-            (analysis_id,),
+            (analysis_id, final_depth),
         )
 
     con.commit()
@@ -136,6 +144,22 @@ def test_snapshot_audit_reports_final_primary_mismatch(tmp_path):
     audit = snapshot_audit(db_path, run_id, EXPECTED_DEPTHS)
 
     assert audit["final_mismatches"] == 1
+
+
+def test_snapshot_audit_low_final_depth_without_active_checkpoint_passes(tmp_path):
+    db_path, run_id = _fixture(
+        tmp_path,
+        missing_post=None,
+        final_depth=8,
+        snapshot_depths=(),
+    )
+
+    audit = snapshot_audit(db_path, run_id, ())
+
+    assert audit["primary_missing"] == 0
+    assert audit["post_move_missing"] == 0
+    assert audit["final_snapshot_missing"] == 0
+    assert audit["final_mismatches"] == 0
 
 
 def test_run_pipeline_rejects_incomplete_snapshot_audit(tmp_path, monkeypatch):

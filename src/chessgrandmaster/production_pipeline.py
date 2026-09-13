@@ -1215,6 +1215,9 @@ def snapshot_audit(
     final_snapshot_missing = 0
 
     for analysis_id, final_depth, final_cp, final_mate, final_uci, final_pv in final_rows:
+        if final_depth not in expected:
+            continue
+
         final_snapshot = snapshots.get(
             (analysis_id, "primary"),
             {},
