@@ -138,11 +138,14 @@ class LucasEngineWorker:
         return chess.engine.Limit(**kwargs)
 
 
-    def _active_snapshot_depths(self):
+    def _active_snapshot_depths(self, final_depth=None):
+        if final_depth is None:
+            final_depth = self.depth
+
         return tuple(
             checkpoint
             for checkpoint in self.snapshot_depths
-            if not self.depth or checkpoint <= self.depth
+            if not final_depth or checkpoint <= final_depth
         )
 
 
@@ -234,29 +237,32 @@ class LucasEngineWorker:
         pov_color,
         source_search,
         forced_first_move=None,
+        search_depth=None,
     ):
         latest_infos = {}
         snapshots = []
         captured_depths = set()
-        active_depths = self._active_snapshot_depths()
+        active_depths = self._active_snapshot_depths(search_depth)
 
         with self.engine.analysis(
             board,
-            self._limit(),
+            self._limit(depth=search_depth),
             multipv=self.multipv if forced_first_move is None else 1,
             info=chess.engine.INFO_ALL,
         ) as analysis:
             for info in analysis:
-                if "score" not in info:
-                    continue
-
                 multipv = info.get("multipv", 1)
-                latest_infos[multipv] = dict(info)
+                aggregate = latest_infos.setdefault(multipv, {})
+                aggregate.update(info)
+
+                if "score" not in aggregate:
+                    continue
 
                 if multipv != 1:
                     continue
 
-                reported_depth = info.get("depth", 0)
+                snapshot_info = dict(aggregate)
+                reported_depth = snapshot_info.get("depth", 0)
 
                 for checkpoint in active_depths:
                     if (
@@ -264,7 +270,7 @@ class LucasEngineWorker:
                         and reported_depth >= checkpoint
                     ):
                         snapshots.append(self._snapshot_from_info(
-                            info,
+                            snapshot_info,
                             pov_color,
                             source_search,
                             checkpoint,
@@ -274,7 +280,7 @@ class LucasEngineWorker:
 
         responses = [
             self._response_from_info(
-                latest_infos[multipv],
+                dict(latest_infos[multipv]),
                 pov_color,
                 source_search,
                 forced_first_move=forced_first_move,
@@ -332,11 +338,22 @@ class LucasEngineWorker:
             board_after = board.copy()
             board_after.push(played_move)
 
+            second_depth = self.depth
+
+            if (
+                not self.depth
+                and not self.nodes
+                and responses
+                and responses[0].depth > 1
+            ):
+                second_depth = responses[0].depth - 1
+
             post_move_responses, post_move_snapshots = self._stream_search(
                 board_after,
                 pov_color,
                 "post_move",
                 forced_first_move=played_move,
+                search_depth=second_depth,
             )
 
             played_response = post_move_responses[0]

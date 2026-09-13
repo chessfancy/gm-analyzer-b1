@@ -30,6 +30,17 @@ class FakeEngine:
         return FakeAnalysis(self.infos)
 
 
+class SequencedFakeEngine:
+
+    def __init__(self, streams):
+        self.streams = iter(streams)
+        self.analysis_calls = []
+
+    def analysis(self, board, limit, **kwargs):
+        self.analysis_calls.append((board.copy(), limit, kwargs))
+        return FakeAnalysis(next(self.streams))
+
+
 def _worker(infos, *, depth=14, multipv=1):
     worker = object.__new__(LucasEngineWorker)
     worker.engine = FakeEngine(infos)
@@ -136,6 +147,53 @@ def test_stream_search_captures_checkpoints_and_latest_multipv_rows():
     ]
 
 
+def test_stream_search_accumulates_split_info_fields_by_multipv_rank():
+    first = _info(
+        depth=11,
+        score=chess.engine.PovScore(chess.engine.Cp(20), chess.WHITE),
+        wdl=chess.engine.PovWdl(
+            chess.engine.Wdl(350, 500, 150), chess.WHITE
+        ),
+        pv=("e2e4", "e7e5"),
+        seldepth=16,
+        nodes=1200,
+        nps=6000,
+        time=0.2,
+    )
+    second = {
+        "depth": 12,
+        "multipv": 1,
+        "score": chess.engine.PovScore(
+            chess.engine.Cp(31), chess.WHITE
+        ),
+    }
+    worker = _worker([first, second], depth=12)
+
+    responses, snapshots = worker._stream_search(
+        chess.Board(), chess.WHITE, "primary"
+    )
+
+    assert len(snapshots) == 1
+    snapshot = snapshots[0]
+    assert snapshot.reported_depth == 12
+    assert snapshot.cp == 31
+    assert snapshot.pv_uci == "e2e4 e7e5"
+    assert (
+        snapshot.wdl_wins,
+        snapshot.wdl_draws,
+        snapshot.wdl_losses,
+    ) == (350, 500, 150)
+    assert (snapshot.seldepth, snapshot.nodes, snapshot.nps) == (
+        16,
+        1200,
+        6000,
+    )
+    assert snapshot.time_ms == 200
+    assert responses[0].cp == 31
+    assert responses[0].pv_uci == "e2e4 e7e5"
+    assert (responses[0].nodes, responses[0].nps) == (1200, 6000)
+
+
 def test_post_move_snapshots_use_original_mover_pov_and_prepended_move():
     infos = [
         _info(
@@ -178,3 +236,32 @@ def test_post_move_snapshots_use_original_mover_pov_and_prepended_move():
     assert snapshots[1].wdl_losses == 5
     assert responses[0].uci == "e2e4"
     assert responses[0].mate == 4
+
+
+def test_time_only_post_move_search_targets_primary_depth_minus_one():
+    primary = [
+        _info(
+            depth=15,
+            score=chess.engine.PovScore(chess.engine.Cp(40), chess.WHITE),
+            wdl=None,
+            pv=("d2d4", "d7d5"),
+        )
+    ]
+    post_move = [
+        _info(
+            depth=14,
+            score=chess.engine.PovScore(chess.engine.Cp(-10), chess.BLACK),
+            wdl=None,
+            pv=("e7e5", "g1f3"),
+        )
+    ]
+    worker = _worker([], depth=0)
+    worker.engine = SequencedFakeEngine([primary, post_move])
+    worker.time_sec = 3.0
+
+    worker.analyze_move(chess.STARTING_FEN, "e2e4")
+
+    assert len(worker.engine.analysis_calls) == 2
+    post_move_limit = worker.engine.analysis_calls[1][1]
+    assert post_move_limit.depth == 14
+    assert post_move_limit.time == 3.0
