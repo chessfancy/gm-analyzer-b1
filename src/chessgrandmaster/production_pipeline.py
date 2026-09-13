@@ -13,6 +13,7 @@ import chess
 import chess.pgn
 
 from .analyzer import TournamentAnalyzer
+from .resource_telemetry import resource_summary
 from .pgn_export import LucasPGNExporter
 from .engine_manifest import (
     resolve_installed_engine,
@@ -263,6 +264,26 @@ def ensure_schema(db_path):
     );
 
 
+    CREATE TABLE IF NOT EXISTS runtime_resource_samples (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id INTEGER NOT NULL,
+        sampled_at TEXT NOT NULL,
+        completed_positions INTEGER,
+        total_positions INTEGER,
+        configured_workers INTEGER,
+        configured_hash_mb_per_worker INTEGER,
+        configured_hash_total_bytes INTEGER,
+        cgroup_memory_current_bytes INTEGER,
+        cgroup_memory_max_bytes INTEGER,
+        mem_total_bytes INTEGER,
+        mem_available_bytes INTEGER,
+        cgm_process_tree_rss_bytes INTEGER,
+        stockfish_process_count INTEGER,
+        stockfish_rss_bytes INTEGER,
+        FOREIGN KEY(run_id) REFERENCES analysis_runs(id)
+    );
+
+
     CREATE INDEX IF NOT EXISTS idx_moves_game
         ON moves(game_id);
 
@@ -281,6 +302,10 @@ def ensure_schema(db_path):
 
     CREATE INDEX IF NOT EXISTS idx_eds_analysis
         ON engine_depth_snapshots(analysis_id);
+
+
+    CREATE INDEX IF NOT EXISTS idx_rrs_run
+        ON runtime_resource_samples(run_id);
     """)
 
     con.commit()
@@ -1406,6 +1431,46 @@ def run_pipeline(
     )
 
     print("After  :", after)
+
+    resource_audit = resource_summary(
+        db_path,
+        run_id,
+    )
+
+    print()
+    print("=== RESOURCE AUDIT ===")
+    print(
+        "Samples                 :",
+        resource_audit["sample_count"],
+    )
+    print(
+        "Configured Hash total   :",
+        resource_audit["configured_hash_total_bytes"],
+    )
+    print(
+        "Peak Stockfish RSS      :",
+        resource_audit["peak_stockfish_rss_bytes"],
+    )
+    print(
+        "Peak CGM tree RSS       :",
+        resource_audit["peak_cgm_process_tree_rss_bytes"],
+    )
+    print(
+        "Peak cgroup usage       :",
+        resource_audit["peak_cgroup_memory_current_bytes"],
+    )
+    print(
+        "Cgroup limit            :",
+        resource_audit["cgroup_memory_max_bytes"],
+    )
+    print(
+        "Minimum MemAvailable    :",
+        resource_audit["minimum_mem_available_bytes"],
+    )
+    print(
+        "Max Stockfish processes :",
+        resource_audit["max_stockfish_process_count"],
+    )
 
 
     expected_moves = imported[

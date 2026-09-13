@@ -1,11 +1,16 @@
 
 import hashlib
 import json
+import os
 import sqlite3
 from datetime import datetime, timezone
 
 from .parallel_runner import ParallelLucasRunner
 from .engine_manifest import configured_engine
+from .resource_telemetry import (
+    collect_resource_sample,
+    persist_resource_sample,
+)
 
 
 class TournamentAnalyzer:
@@ -49,6 +54,32 @@ class TournamentAnalyzer:
                 h.update(block)
 
         return h.hexdigest()
+
+
+    def _sample_resources(
+        self,
+        run_id,
+        root_pid,
+        completed_positions,
+        total_positions,
+    ):
+        """Best-effort resource sampling that cannot interrupt analysis."""
+        try:
+            sample = collect_resource_sample(
+                root_pid,
+                self.workers,
+                self.hash_mb,
+            )
+            persist_resource_sample(
+                self.db_path,
+                run_id,
+                sample,
+                completed_positions=completed_positions,
+                total_positions=total_positions,
+            )
+            return sample
+        except Exception:
+            return None
 
 
     def create_run(self, scope=None):
@@ -520,6 +551,14 @@ class TournamentAnalyzer:
             snapshot_depths=self.snapshot_depths,
         ) as runner:
 
+            root_pid = os.getpid()
+            self._sample_resources(
+                run_id,
+                root_pid,
+                completed_positions=0,
+                total_positions=total,
+            )
+
             for start in range(
                 0,
                 total,
@@ -550,12 +589,26 @@ class TournamentAnalyzer:
                     total
                 )
 
+                self._sample_resources(
+                    run_id,
+                    root_pid,
+                    completed_positions=done,
+                    total_positions=total,
+                )
+
                 print(
                     f"Checkpoint "
                     f"{done}/{total} | "
                     f"completed={completed_total} "
                     f"failed={failed_total}"
                 )
+
+            self._sample_resources(
+                run_id,
+                root_pid,
+                completed_positions=total,
+                total_positions=total,
+            )
 
 
         return {
