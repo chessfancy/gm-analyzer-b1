@@ -23,6 +23,24 @@ class EngineResponse:
 
 
 @dataclass
+class DepthSnapshot:
+    source_search: str
+    checkpoint_depth: int
+    reported_depth: int
+    uci: str
+    cp: int
+    mate: int
+    wdl_wins: int | None
+    wdl_draws: int | None
+    wdl_losses: int | None
+    seldepth: int
+    nodes: int
+    nps: int
+    time_ms: int
+    pv_uci: str
+
+
+@dataclass
 class AnalysisResult:
     fen_before: str
     played_uci: str
@@ -32,6 +50,7 @@ class AnalysisResult:
     category: str
     nag: int
     second_search: bool
+    depth_snapshots: list
 
 
 def _sort_key(r):
@@ -61,8 +80,9 @@ class LucasEngineWorker:
         hash_mb=256,
         multipv=1,
         depth=18,
-        time_sec=3.0,
+        time_sec=0.0,
         nodes=0,
+        snapshot_depths=(12, 14, 16, 18, 19),
     ):
         self.engine_path = str(engine_path)
 
@@ -73,6 +93,7 @@ class LucasEngineWorker:
         self.depth = depth
         self.time_sec = time_sec
         self.nodes = nodes
+        self.snapshot_depths = tuple(snapshot_depths)
 
         # Persistent Stockfish process.
         self.engine = chess.engine.SimpleEngine.popen_uci(
@@ -82,6 +103,7 @@ class LucasEngineWorker:
         self.engine.configure({
             "Threads": self.threads,
             "Hash": self.hash_mb,
+            "UCI_ShowWDL": True,
         })
 
 
@@ -114,6 +136,14 @@ class LucasEngineWorker:
             kwargs["nodes"] = self.nodes
 
         return chess.engine.Limit(**kwargs)
+
+
+    def _active_snapshot_depths(self):
+        return tuple(
+            checkpoint
+            for checkpoint in self.snapshot_depths
+            if not self.depth or checkpoint <= self.depth
+        )
 
 
     def _response_from_info(
@@ -160,6 +190,101 @@ class LucasEngineWorker:
         )
 
 
+    def _snapshot_from_info(
+        self,
+        info,
+        pov_color,
+        source_search,
+        checkpoint_depth,
+        forced_first_move=None,
+    ):
+        response = self._response_from_info(
+            info,
+            pov_color,
+            source_search,
+            forced_first_move=forced_first_move,
+        )
+
+        wdl = info.get("wdl")
+
+        if wdl is not None:
+            wdl = wdl.pov(pov_color)
+
+        return DepthSnapshot(
+            source_search=source_search,
+            checkpoint_depth=checkpoint_depth,
+            reported_depth=response.depth,
+            uci=response.uci,
+            cp=response.cp,
+            mate=response.mate,
+            wdl_wins=wdl.wins if wdl is not None else None,
+            wdl_draws=wdl.draws if wdl is not None else None,
+            wdl_losses=wdl.losses if wdl is not None else None,
+            seldepth=response.seldepth,
+            nodes=response.nodes,
+            nps=response.nps,
+            time_ms=response.time_ms,
+            pv_uci=response.pv_uci,
+        )
+
+
+    def _stream_search(
+        self,
+        board,
+        pov_color,
+        source_search,
+        forced_first_move=None,
+    ):
+        latest_infos = {}
+        snapshots = []
+        captured_depths = set()
+        active_depths = self._active_snapshot_depths()
+
+        with self.engine.analysis(
+            board,
+            self._limit(),
+            multipv=self.multipv if forced_first_move is None else 1,
+            info=chess.engine.INFO_ALL,
+        ) as analysis:
+            for info in analysis:
+                if "score" not in info:
+                    continue
+
+                multipv = info.get("multipv", 1)
+                latest_infos[multipv] = dict(info)
+
+                if multipv != 1:
+                    continue
+
+                reported_depth = info.get("depth", 0)
+
+                for checkpoint in active_depths:
+                    if (
+                        checkpoint not in captured_depths
+                        and reported_depth >= checkpoint
+                    ):
+                        snapshots.append(self._snapshot_from_info(
+                            info,
+                            pov_color,
+                            source_search,
+                            checkpoint,
+                            forced_first_move=forced_first_move,
+                        ))
+                        captured_depths.add(checkpoint)
+
+        responses = [
+            self._response_from_info(
+                latest_infos[multipv],
+                pov_color,
+                source_search,
+                forced_first_move=forced_first_move,
+            )
+            for multipv in sorted(latest_infos)
+        ]
+
+        return responses, snapshots
+
+
     def analyze_move(self, fen_before, played_uci):
 
         board = chess.Board(fen_before)
@@ -178,24 +303,11 @@ class LucasEngineWorker:
         # SEARCH #1
         # -------------------------------------------
 
-        infos = self.engine.analyse(
+        responses, depth_snapshots = self._stream_search(
             board,
-            self._limit(),
-            multipv=self.multipv,
-            info=chess.engine.INFO_ALL,
+            pov_color,
+            "primary",
         )
-
-        if not isinstance(infos, list):
-            infos = [infos]
-
-        responses = [
-            self._response_from_info(
-                info,
-                pov_color,
-                "primary",
-            )
-            for info in infos
-        ]
 
         played_response = None
 
@@ -220,39 +332,19 @@ class LucasEngineWorker:
             board_after = board.copy()
             board_after.push(played_move)
 
-            # Lucas R6:
-            # If analysis was time-only, second search targets
-            # roughly first-search depth - 1.
-            second_depth = self.depth
-
-            if (
-                not self.depth
-                and not self.nodes
-                and responses
-                and responses[0].depth > 1
-            ):
-                second_depth = responses[0].depth - 1
-
-            info_after = self.engine.analyse(
+            post_move_responses, post_move_snapshots = self._stream_search(
                 board_after,
-                self._limit(depth=second_depth),
-                multipv=1,
-                info=chess.engine.INFO_ALL,
-            )
-
-            if isinstance(info_after, list):
-                info_after = info_after[0]
-
-            played_response = self._response_from_info(
-                info_after,
                 pov_color,
                 "post_move",
                 forced_first_move=played_move,
             )
 
+            played_response = post_move_responses[0]
+
             played_response.is_played = True
 
             responses.append(played_response)
+            depth_snapshots.extend(post_move_snapshots)
 
 
         # -------------------------------------------
@@ -299,4 +391,5 @@ class LucasEngineWorker:
             category=category,
             nag=nag,
             second_search=second_search,
+            depth_snapshots=depth_snapshots,
         )
