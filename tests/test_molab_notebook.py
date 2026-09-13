@@ -19,3 +19,14 @@ def test_molab_notebook_is_portable_b1_entrypoint():
     assert "CGM_VENV" in text
     assert "CGM_HOME" in text
     assert "cgm-bench" not in text
+
+
+def test_molab_platform_probe_reuses_verified_engine_and_exports_json():
+    text = NOTEBOOK.read_text(encoding="utf-8")
+
+    assert "Export platform JSON" in text
+    assert 'setup_status["engine"]' in text
+    assert 'CGM_STOCKFISH' in text
+    assert "molab_platform.json" in text
+    assert "hardware_info" in text
+    assert "suggested_workers" in text
