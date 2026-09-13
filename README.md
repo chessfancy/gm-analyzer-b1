@@ -18,6 +18,14 @@ Engine discovery order: explicit argument, `CGM_STOCKFISH`, managed install path
 
 Managed destination: `CGM_ENGINE_INSTALL_PATH`, otherwise `$CGM_HOME/bin/stockfish`, otherwise `~/.local/share/chessgrandmaster/bin/stockfish`.
 
+## Molab B1 runner
+
+Open the portable B1 notebook directly from GitHub in Molab:
+
+https://molab.marimo.io/github/chessfancy/gm-analyzer-b1/blob/chatgpt-work/notebooks/molab_b1.py
+
+The notebook deliberately skips compute benchmarking. Click **Setup B1** to clone/update `chatgpt-work`, create the isolated runtime, install and verify the pinned Stockfish 19 binary, then upload a PGN with Molab's file browser and click **Analyze PGN**. Runtime outputs are collected under `cgm_molab_data/db` and `cgm_molab_data/output` so they can be downloaded before the session is discarded.
+
 ## Standard compute qualification
 
 ```bash
