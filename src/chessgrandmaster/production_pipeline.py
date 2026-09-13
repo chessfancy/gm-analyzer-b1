@@ -1094,6 +1094,174 @@ def database_audit(
     }
 
 
+def snapshot_audit(
+    db_path,
+    run_id,
+    expected_depths,
+):
+    """Check depth snapshot coverage and final primary consistency.
+
+    ``expected_depths`` contains the checkpoints required for each completed
+    analysis.  A post-move search is required only for analyses that have a
+    final ``post_move`` response.  The final primary response is compared with
+    the snapshot at its final checkpoint on score and first PV move.
+    """
+
+    expected = tuple(dict.fromkeys(expected_depths))
+
+    con = sqlite3.connect(db_path)
+
+    try:
+        completed_ids = [
+            row[0]
+            for row in con.execute(
+                """
+                SELECT id
+                FROM move_analysis
+                WHERE run_id=?
+                  AND status='completed'
+                ORDER BY id
+                """,
+                (run_id,),
+            ).fetchall()
+        ]
+
+        snapshot_rows = con.execute(
+            """
+            SELECT eds.analysis_id, eds.source_search,
+                   eds.checkpoint_depth, eds.cp, eds.mate,
+                   eds.uci, eds.pv_uci
+            FROM engine_depth_snapshots eds
+            JOIN move_analysis ma
+              ON ma.id=eds.analysis_id
+            WHERE ma.run_id=?
+              AND ma.status='completed'
+            """,
+            (run_id,),
+        ).fetchall()
+
+        snapshots = {}
+        for (
+            analysis_id,
+            source_search,
+            checkpoint_depth,
+            cp,
+            mate,
+            uci,
+            pv_uci,
+        ) in snapshot_rows:
+            snapshots.setdefault(
+                (analysis_id, source_search),
+                {},
+            )[checkpoint_depth] = {
+                "cp": cp,
+                "mate": mate,
+                "uci": uci,
+                "pv_uci": pv_uci,
+            }
+
+        primary_missing = sum(
+            depth not in snapshots.get((analysis_id, "primary"), {})
+            for analysis_id in completed_ids
+            for depth in expected
+        )
+
+        post_move_ids = [
+            row[0]
+            for row in con.execute(
+                """
+                SELECT DISTINCT ma.id
+                FROM move_analysis ma
+                JOIN engine_responses er
+                  ON er.analysis_id=ma.id
+                WHERE ma.run_id=?
+                  AND ma.status='completed'
+                  AND er.source_search='post_move'
+                ORDER BY ma.id
+                """,
+                (run_id,),
+            ).fetchall()
+        ]
+
+        post_move_missing = sum(
+            depth not in snapshots.get((analysis_id, "post_move"), {})
+            for analysis_id in post_move_ids
+            for depth in expected
+        )
+
+        final_rows = con.execute(
+            """
+            SELECT ma.id, er.depth, er.cp, er.mate, er.uci, er.pv_uci
+            FROM move_analysis ma
+            LEFT JOIN engine_responses er
+              ON er.analysis_id=ma.id
+             AND er.source_search='primary'
+             AND er.rank=0
+            WHERE ma.run_id=?
+              AND ma.status='completed'
+            ORDER BY ma.id
+            """,
+            (run_id,),
+        ).fetchall()
+    finally:
+        con.close()
+
+    def first_pv_move(pv_uci, uci):
+        if pv_uci:
+            return pv_uci.split()[0]
+        return uci or ""
+
+    final_mismatches = 0
+    final_snapshot_missing = 0
+
+    for analysis_id, final_depth, final_cp, final_mate, final_uci, final_pv in final_rows:
+        final_snapshot = snapshots.get(
+            (analysis_id, "primary"),
+            {},
+        ).get(final_depth)
+
+        if final_snapshot is None:
+            final_snapshot_missing += 1
+            final_mismatches += 1
+            continue
+
+        if (
+            final_snapshot["cp"] != final_cp
+            or final_snapshot["mate"] != final_mate
+            or first_pv_move(
+                final_snapshot["pv_uci"],
+                final_snapshot["uci"],
+            )
+            != first_pv_move(final_pv, final_uci)
+        ):
+            final_mismatches += 1
+
+    audit = {
+        "completed": len(completed_ids),
+        "expected_depths": list(expected),
+        "primary_expected": len(completed_ids) * len(expected),
+        "primary_present":
+            len(completed_ids) * len(expected) - primary_missing,
+        "primary_missing": primary_missing,
+        "post_move_analyses": len(post_move_ids),
+        "post_move_expected": len(post_move_ids) * len(expected),
+        "post_move_present":
+            len(post_move_ids) * len(expected) - post_move_missing,
+        "post_move_missing": post_move_missing,
+        "final_checked": len(final_rows),
+        "final_snapshot_missing": final_snapshot_missing,
+        "final_mismatches": final_mismatches,
+    }
+
+    print()
+    print("=== DEPTH SNAPSHOT AUDIT ===")
+    print("primary snapshot missing=", audit["primary_missing"])
+    print("post_move snapshot missing=", audit["post_move_missing"])
+    print("final snapshot mismatches=", audit["final_mismatches"])
+
+    return audit
+
+
 # ============================================================
 # PGN AUDIT
 # ============================================================
@@ -1575,6 +1743,33 @@ def run_pipeline(
 
 
     # --------------------------------------------------------
+    # Depth snapshot audit
+    # --------------------------------------------------------
+
+    active_snapshot_depths = tuple(
+        checkpoint
+        for checkpoint in snapshot_depths
+        if checkpoint <= depth
+    )
+
+    snapshot_audit_result = snapshot_audit(
+        db_path,
+        run_id,
+        active_snapshot_depths,
+    )
+
+    if (
+        snapshot_audit_result["primary_missing"] != 0
+        or snapshot_audit_result["post_move_missing"] != 0
+        or snapshot_audit_result["final_mismatches"] != 0
+    ):
+        raise RuntimeError(
+            "Depth snapshot audit failed: "
+            f"{snapshot_audit_result}"
+        )
+
+
+    # --------------------------------------------------------
     # Safety check for the cumulative StringExporter bug
     # --------------------------------------------------------
 
@@ -1747,6 +1942,9 @@ def run_pipeline(
 
         "categories":
             audit["categories"],
+
+        "snapshot_audit":
+            snapshot_audit_result,
 
         "mistakes":
             mistakes,
