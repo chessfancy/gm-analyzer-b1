@@ -44,7 +44,7 @@ def _(mo):
            `cgm_molab_data/molab_platform.json` for worker selection.
         3. Upload a PGN with Molab's file browser and paste its path below.
         4. Click **Analyze PGN**. Molab uses the provider policy of
-           **4 workers**, Threads/worker=1, Hash/worker=512 MB, depth=19,
+           **4 workers**, Threads/worker=1, Hash/worker=1536 MB, depth=19,
            no time limit, and snapshots at depths 12, 14, 16, 18 and 19.
            Results are written under `cgm_molab_data/db` and
            `cgm_molab_data/output`.
@@ -262,7 +262,7 @@ print(json.dumps({
         "engine": _runtime["engine"],
         "worker_policy": {
             "threads_per_worker": 1,
-            "hash_mb_per_worker": 512,
+            "hash_mb_per_worker": 1536,
             "suggested_workers": _runtime["hardware"]["suggested_workers"],
         },
     }
@@ -345,9 +345,7 @@ def _(
 
     subprocess.run(
         [
-            str(_analyzer), "--workers", "4",
-            "--hash-mb",
-            "512",
+            str(_analyzer), "--platform-profile", "molab",
             "--depth",
             "19",
             str(_input),
@@ -379,7 +377,7 @@ def _(
         **Policy**
         - Workers: 4
         - Threads/worker: 1
-        - Hash/worker: 512 MB
+        - Hash/worker: 1536 MB
         - Depth: 19
         - Time limit: OFF
         - Snapshot depths: 12, 14, 16, 18, 19

@@ -14,7 +14,7 @@ class FakeAnalyzer:
 
 
 def test_depth_only_policy_bumps_pipeline_version():
-    assert pp.PIPELINE_VERSION == 2
+    assert pp.PIPELINE_VERSION == 3
 
 
 def test_changed_engine_config_does_not_recover_old_run(tmp_path):
@@ -260,6 +260,114 @@ def test_legacy_depth18_time_limited_run_is_not_recovered_by_depth_only_policy(
         },
     )
 
+    assert created is True
+    assert run_id == 999
+
+
+def test_v2_run_is_not_recovered_by_v3_even_when_engine_values_match(tmp_path):
+    db = tmp_path / "analysis.sqlite"
+    pp.ensure_schema(db)
+    source_sha = "v2-source"
+
+    con = sqlite3.connect(db)
+    con.execute(
+        "INSERT INTO source_files(filename, sha256, game_count) VALUES (?, ?, ?)",
+        ("games.pgn", source_sha, 1),
+    )
+    con.execute(
+        "INSERT INTO analysis_runs(config_json) VALUES (?)",
+        (json.dumps({
+            "scope": {
+                "purpose": "production_tournament_full",
+                "pipeline_version": 2,
+                "source_sha256": source_sha,
+                "engine": {
+                    "workers": 2,
+                    "threads": 1,
+                    "hash_mb": 256,
+                    "multipv": 1,
+                    "depth": 18,
+                    "time_sec": 0.0,
+                    "snapshot_depths": [12, 14, 16, 18, 19],
+                    "scheduler": "game_affinity_lpt",
+                },
+            },
+        }),),
+    )
+    con.commit()
+    con.close()
+
+    analyzer = FakeAnalyzer()
+    run_id, created = pp.find_or_create_run(
+        analyzer,
+        db,
+        source_sha,
+        {
+            "workers": 2,
+            "threads": 1,
+            "hash_mb": 256,
+            "multipv": 1,
+            "depth": 18,
+            "time_sec": 0.0,
+            "snapshot_depths": [12, 14, 16, 18, 19],
+            "scheduler": "game_affinity_lpt",
+        },
+    )
+
+    assert created is True
+    assert run_id == 999
+    assert analyzer.created == 1
+
+
+def test_v3_recovery_requires_matching_affinity_and_hash(tmp_path):
+    db = tmp_path / "analysis.sqlite"
+    pp.ensure_schema(db)
+    source_sha = "v3-source"
+    scope = {
+        "purpose": "production_tournament_full",
+        "pipeline_version": 3,
+        "source_sha256": source_sha,
+        "engine": {
+            "workers": 2,
+            "threads": 1,
+            "hash_mb": 768,
+            "multipv": 1,
+            "depth": 19,
+            "time_sec": 0.0,
+            "snapshot_depths": [12, 14, 16, 18, 19],
+            "scheduler": "game_affinity_lpt",
+        },
+    }
+    con = sqlite3.connect(db)
+    con.execute(
+        "INSERT INTO source_files(filename, sha256, game_count) VALUES (?, ?, ?)",
+        ("games.pgn", source_sha, 1),
+    )
+    con.execute(
+        "INSERT INTO analysis_runs(config_json) VALUES (?)",
+        (json.dumps({"scope": scope}),),
+    )
+    old_run_id = con.execute("SELECT last_insert_rowid()").fetchone()[0]
+    con.commit()
+    con.close()
+
+    analyzer = FakeAnalyzer()
+    matching = dict(scope["engine"])
+    run_id, created = pp.find_or_create_run(
+        analyzer,
+        db,
+        source_sha,
+        matching,
+    )
+    assert (run_id, created) == (old_run_id, False)
+
+    different_hash = dict(matching, hash_mb=1024)
+    run_id, created = pp.find_or_create_run(
+        analyzer,
+        db,
+        source_sha,
+        different_hash,
+    )
     assert created is True
     assert run_id == 999
     assert analyzer.created == 1

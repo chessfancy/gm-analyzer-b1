@@ -78,3 +78,27 @@ def test_cli_rejects_nonpositive_production_knobs(tmp_path):
 
         with pytest.raises(SystemExit):
             cli.build_parser().parse_args([flag, "-1", str(pgn)])
+
+
+def test_cli_resolves_named_profile_and_explicit_overrides(monkeypatch, tmp_path):
+    from chessgrandmaster import cli
+
+    pgn = tmp_path / "tournament.pgn"
+    pgn.write_text('[Event "Test"]\n\n*\n', encoding="utf-8")
+    called = {}
+
+    def fake_run_pipeline(pgn_input, **kwargs):
+        called["kwargs"] = kwargs
+        return {"ok": True}
+
+    monkeypatch.setattr(cli, "run_pipeline", fake_run_pipeline)
+    assert cli.main([
+        "--platform-profile", "molab",
+        "--hash-mb", "1024",
+        "--threads", "1",
+        str(pgn),
+    ]) == 0
+
+    assert called["kwargs"]["workers"] == 4
+    assert called["kwargs"]["threads"] == 1
+    assert called["kwargs"]["hash_mb"] == 1024

@@ -28,6 +28,7 @@ def test_molab_platform_probe_reuses_verified_engine_and_exports_json():
     assert 'setup_status["engine"]' in text
     assert 'CGM_STOCKFISH' in text
     assert "molab_platform.json" in text
+    assert '"hash_mb_per_worker": 1536' in text
     assert "hardware_info" in text
     assert "suggested_workers" in text
 
@@ -35,7 +36,7 @@ def test_molab_platform_probe_reuses_verified_engine_and_exports_json():
 def test_molab_analysis_uses_provider_worker_policy():
     text = NOTEBOOK.read_text(encoding="utf-8")
 
-    assert '"--workers", "4"' in text
+    assert '"--platform-profile", "molab"' in text
 
 
 def test_molab_analysis_uses_depth_19_hash_and_snapshot_policy():
@@ -57,10 +58,8 @@ def test_molab_analysis_uses_depth_19_hash_and_snapshot_policy():
 
     expected_command = [
         "str(_analyzer)",
-        "--workers",
-        "4",
-        "--hash-mb",
-        "512",
+        "--platform-profile",
+        "molab",
         "--depth",
         "19",
         "str(_input)",
@@ -84,7 +83,7 @@ def test_molab_analysis_uses_depth_19_hash_and_snapshot_policy():
     assert matching_commands == [expected_command]
     assert "Workers: 4" in text
     assert "Threads/worker: 1" in text
-    assert "Hash/worker: 512 MB" in text
+    assert "Hash/worker: 1536 MB" in text
     assert "Depth: 19" in text
     assert "Time limit: OFF" in text
     assert "Snapshot depths: 12, 14, 16, 18, 19" in text

@@ -19,9 +19,10 @@ from .engine_manifest import (
     resolve_installed_engine,
     verify_engine_binary,
 )
+from .platform_policy import resolve_platform_policy
 
 
-PIPELINE_VERSION = 2
+PIPELINE_VERSION = 3
 
 
 # ============================================================
@@ -91,6 +92,28 @@ def resolve_engine_binary(value=None):
 # ============================================================
 # SQLITE SCHEMA
 # ============================================================
+
+def _table_columns(con, table):
+    return {
+        row[1]
+        for row in con.execute(
+            f"PRAGMA table_info({table})"
+        ).fetchall()
+    }
+
+
+def _ensure_columns(con, table, definitions):
+    existing = _table_columns(con, table)
+    if not existing:
+        return
+
+    for column, definition in definitions.items():
+        if column in existing:
+            continue
+        con.execute(
+            f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
+        )
+        existing.add(column)
 
 def ensure_schema(db_path):
 
@@ -201,6 +224,10 @@ def ensure_schema(db_path):
         started_at TEXT,
         finished_at TEXT,
 
+        execution_id TEXT,
+        worker_id INTEGER,
+        engine_session_id TEXT,
+
         UNIQUE(
             run_id,
             move_id
@@ -237,6 +264,13 @@ def ensure_schema(db_path):
 
         pv_uci TEXT,
 
+        hashfull INTEGER,
+        tbhits INTEGER,
+        info_json TEXT,
+        execution_id TEXT,
+        worker_id INTEGER,
+        engine_session_id TEXT,
+
         FOREIGN KEY(analysis_id)
             REFERENCES move_analysis(id)
     );
@@ -259,6 +293,12 @@ def ensure_schema(db_path):
         nps INTEGER,
         time_ms INTEGER,
         pv_uci TEXT,
+        hashfull INTEGER,
+        tbhits INTEGER,
+        info_json TEXT,
+        execution_id TEXT,
+        worker_id INTEGER,
+        engine_session_id TEXT,
         UNIQUE(analysis_id, source_search, checkpoint_depth),
         FOREIGN KEY(analysis_id) REFERENCES move_analysis(id)
     );
@@ -280,6 +320,28 @@ def ensure_schema(db_path):
         cgm_process_tree_rss_bytes INTEGER,
         stockfish_process_count INTEGER,
         stockfish_rss_bytes INTEGER,
+        FOREIGN KEY(run_id) REFERENCES analysis_runs(id)
+    );
+
+
+    CREATE TABLE IF NOT EXISTS uci_event_archives (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id INTEGER NOT NULL,
+        execution_id TEXT NOT NULL,
+        worker_id INTEGER NOT NULL,
+        engine_session_id TEXT NOT NULL,
+        relative_path TEXT NOT NULL,
+        compression TEXT NOT NULL,
+        event_count INTEGER NOT NULL,
+        created_at TEXT,
+        closed_at TEXT,
+        UNIQUE(
+            run_id,
+            execution_id,
+            worker_id,
+            engine_session_id,
+            relative_path
+        ),
         FOREIGN KEY(run_id) REFERENCES analysis_runs(id)
     );
 
@@ -307,6 +369,28 @@ def ensure_schema(db_path):
     CREATE INDEX IF NOT EXISTS idx_rrs_run
         ON runtime_resource_samples(run_id);
     """)
+
+    _ensure_columns(con, "move_analysis", {
+        "execution_id": "TEXT",
+        "worker_id": "INTEGER",
+        "engine_session_id": "TEXT",
+    })
+    _ensure_columns(con, "engine_responses", {
+        "hashfull": "INTEGER",
+        "tbhits": "INTEGER",
+        "info_json": "TEXT",
+        "execution_id": "TEXT",
+        "worker_id": "INTEGER",
+        "engine_session_id": "TEXT",
+    })
+    _ensure_columns(con, "engine_depth_snapshots", {
+        "hashfull": "INTEGER",
+        "tbhits": "INTEGER",
+        "info_json": "TEXT",
+        "execution_id": "TEXT",
+        "worker_id": "INTEGER",
+        "engine_session_id": "TEXT",
+    })
 
     con.commit()
     con.close()
@@ -894,6 +978,15 @@ def find_or_create_run(
             ):
                 continue
 
+            stored_pipeline_version = scope.get(
+                "pipeline_version"
+            )
+            if (
+                stored_pipeline_version is not None
+                and stored_pipeline_version != PIPELINE_VERSION
+            ):
+                continue
+
 
             # Transitional modern scope:
             # it may contain an engine config whose only
@@ -979,6 +1072,96 @@ def find_or_create_run(
 # ============================================================
 # DB AUDIT
 # ============================================================
+
+def execution_audit(
+    db_path,
+    run_id,
+    execution_id,
+):
+    """Report provenance and parsed-telemetry coverage for one execution."""
+    con = sqlite3.connect(db_path)
+    try:
+        provenance_rows = con.execute(
+            """
+            SELECT m.game_id, ma.worker_id, ma.engine_session_id
+            FROM move_analysis ma
+            JOIN moves m
+              ON m.id=ma.move_id
+            WHERE ma.run_id=?
+              AND ma.execution_id=?
+              AND ma.status='completed'
+            ORDER BY m.game_id, m.ply
+            """,
+            (run_id, execution_id),
+        ).fetchall()
+
+        archive_files, archived_events = con.execute(
+            """
+            SELECT COUNT(*), COALESCE(SUM(event_count), 0)
+            FROM uci_event_archives
+            WHERE run_id=?
+              AND execution_id=?
+            """,
+            (run_id, execution_id),
+        ).fetchone()
+
+        snapshot_count, info_missing, hashfull_available, tbhits_available = con.execute(
+            """
+            SELECT
+                COUNT(*),
+                SUM(CASE WHEN info_json IS NULL OR info_json='' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN hashfull IS NOT NULL THEN 1 ELSE 0 END),
+                SUM(CASE WHEN tbhits IS NOT NULL THEN 1 ELSE 0 END)
+            FROM engine_depth_snapshots
+            WHERE execution_id=?
+            """,
+            (execution_id,),
+        ).fetchone()
+    finally:
+        con.close()
+
+    workers_used = {
+        worker_id
+        for _, worker_id, _ in provenance_rows
+        if worker_id is not None
+    }
+    engine_sessions = {
+        session_id
+        for _, _, session_id in provenance_rows
+        if session_id is not None
+    }
+    games = {}
+    for game_id, worker_id, session_id in provenance_rows:
+        games.setdefault(game_id, {"workers": set(), "sessions": set()})
+        if worker_id is not None:
+            games[game_id]["workers"].add(worker_id)
+        if session_id is not None:
+            games[game_id]["sessions"].add(session_id)
+
+    violating_games = [
+        game_id
+        for game_id, values in games.items()
+        if len(values["workers"]) > 1 or len(values["sessions"]) > 1
+    ]
+
+    report = {
+        "execution_id": execution_id,
+        "workers_used": len(workers_used),
+        "number_of_workers": len(workers_used),
+        "engine_sessions": len(engine_sessions),
+        "number_of_engine_sessions": len(engine_sessions),
+        "analyzed_games": len(games),
+        "affinity_violations": len(violating_games),
+        "affinity_violation_games": violating_games,
+        "uci_archive_files": archive_files or 0,
+        "archived_info_event_count": archived_events or 0,
+        "snapshots_info_json_missing": info_missing or 0,
+        "snapshots_hashfull_available": hashfull_available or 0,
+        "snapshots_tbhits_available": tbhits_available or 0,
+        "snapshot_count": snapshot_count or 0,
+    }
+    return report
+
 
 def database_audit(
     db_path,
@@ -1392,16 +1575,27 @@ def run_pipeline(
 
     engine_binary=None,
 
-    workers=2,
-    threads=1,
-    hash_mb=256,
+    workers=None,
+    threads=None,
+    hash_mb=None,
     multipv=1,
     depth=18,
     time_sec=0.0,
     snapshot_depths=(12, 14, 16, 18, 19),
+    platform_profile=None,
 ):
     if depth <= 0:
         raise ValueError("depth must be positive")
+
+    policy = resolve_platform_policy(
+        platform_profile,
+        workers=workers,
+        threads=threads,
+        hash_mb=hash_mb,
+    )
+    workers = policy["workers"]
+    threads = policy["threads"]
+    hash_mb = policy["hash_mb"]
 
 
     root = (
@@ -1532,6 +1726,8 @@ def run_pipeline(
         time_sec=time_sec,
         snapshot_depths=snapshot_depths,
         batch_size=100,
+        archive_root=root,
+        archive_enabled=True,
     )
 
 
@@ -1562,6 +1758,15 @@ def run_pipeline(
 
         "snapshot_depths":
             list(snapshot_depths),
+
+        "scheduler":
+            "game_affinity_lpt",
+
+        "game_affinity":
+            True,
+
+        "telemetry_archive":
+            True,
     }
 
 
@@ -1593,17 +1798,21 @@ def run_pipeline(
 
     print("Before :", before)
 
+    analysis_result = {
+        "execution_id": None,
+        "archive_manifests": [],
+    }
 
     if (
         before["pending"] > 0
         or before["failed"] > 0
     ):
 
-        result = analyzer.analyze(
+        analysis_result = analyzer.analyze(
             run_id
         )
 
-        print("Result :", result)
+        print("Result :", analysis_result)
 
     else:
 
@@ -1618,6 +1827,34 @@ def run_pipeline(
     )
 
     print("After  :", after)
+
+    execution_report = execution_audit(
+        db_path,
+        run_id,
+        analysis_result.get("execution_id"),
+    )
+
+    print()
+    print("=== EXECUTION AUDIT ===")
+    print("Execution ID          :", execution_report["execution_id"])
+    print("Workers used          :", execution_report["workers_used"])
+    print("Engine sessions       :", execution_report["engine_sessions"])
+    print("Analyzed games        :", execution_report["analyzed_games"])
+    print("Affinity violations   :", execution_report["affinity_violations"])
+    print("UCI archive files     :", execution_report["uci_archive_files"])
+    print("Archived INFO events  :", execution_report["archived_info_event_count"])
+    print("Snapshots missing JSON:", execution_report["snapshots_info_json_missing"])
+    print("Snapshots with hashfull:", execution_report["snapshots_hashfull_available"])
+    print("Snapshots with tbhits:", execution_report["snapshots_tbhits_available"])
+
+    if (
+        analysis_result.get("execution_id") is not None
+        and execution_report["snapshots_info_json_missing"] != 0
+    ):
+        raise RuntimeError(
+            "Required snapshot info_json missing: "
+            f"{execution_report['snapshots_info_json_missing']}"
+        )
 
     resource_audit = resource_summary(
         db_path,
@@ -1948,6 +2185,9 @@ def run_pipeline(
 
         "snapshot_audit":
             snapshot_audit_result,
+
+        "execution_audit":
+            execution_report,
 
         "mistakes":
             mistakes,
