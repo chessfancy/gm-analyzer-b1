@@ -6,14 +6,16 @@ app = marimo.App(width="full")
 
 @app.cell
 def _():
+    import json
     import os
     import shutil
     import subprocess
+    from datetime import datetime, timezone
     from pathlib import Path
 
     import marimo as mo
 
-    return Path, mo, os, shutil, subprocess
+    return Path, datetime, json, mo, os, shutil, subprocess, timezone
 
 
 @app.cell
@@ -36,11 +38,18 @@ def _(mo):
         Portable B1 runner for the same GitHub code used on Codespaces,
         Deepnote and Kaggle. This notebook does **not** run benchmarks.
 
-        1. Click **Setup B1** to clone/update the repo, install the package,
-           install and verify the pinned Stockfish 19 binary.
-        2. Upload a PGN with Molab's file browser and paste its path below.
-        3. Click **Analyze PGN**. Results are written under
+        1. Click **Setup / Reuse B1** to clone/update the repo, install the
+           package, install and verify the pinned Stockfish 19 binary.
+        2. Optionally click **Export platform JSON** and upload
+           `cgm_molab_data/molab_platform.json` for worker selection.
+        3. Upload a PGN with Molab's file browser and paste its path below.
+        4. Click **Analyze PGN**. Results are written under
            `cgm_molab_data/db` and `cgm_molab_data/output`.
+
+        Molab treats `/tmp` as scratch runtime. A fresh runtime needs setup
+        again, while files uploaded through Molab's file browser can persist
+        across sessions. Keep important result files by downloading them or
+        copying them to persistent/remote storage.
         """
     )
     return
@@ -48,7 +57,7 @@ def _(mo):
 
 @app.cell
 def _(mo):
-    setup_button = mo.ui.run_button(label="Setup B1", kind="success")
+    setup_button = mo.ui.run_button(label="Setup / Reuse B1", kind="success")
     setup_button
     return (setup_button,)
 
@@ -67,7 +76,10 @@ def _(
     subprocess,
     venv_dir,
 ):
-    mo.stop(not setup_button.value, mo.md("Click **Setup B1** to prepare Molab."))
+    mo.stop(
+        not setup_button.value,
+        mo.md("Click **Setup / Reuse B1** to prepare Molab."),
+    )
 
     if shutil.which("git") is None:
         raise RuntimeError("git is required but was not found in the Molab runtime")
@@ -156,6 +168,133 @@ def _(
 
 
 @app.cell
+def _(mo, setup_status):
+    platform_button = mo.ui.run_button(
+        label="Export platform JSON",
+        kind="neutral",
+    )
+    mo.vstack(
+        [
+            mo.md(
+                f"Verified Stockfish: `{setup_status['engine']}`\n\n"
+                "This probe reads CPU quota, effective CPU, RAM and the "
+                "suggested worker count. It does not benchmark Stockfish."
+            ),
+            platform_button,
+        ]
+    )
+    return (platform_button,)
+
+
+@app.cell
+def _(
+    data_root,
+    datetime,
+    json,
+    mo,
+    os,
+    platform_button,
+    repo_dir,
+    setup_status,
+    subprocess,
+    timezone,
+    venv_dir,
+):
+    mo.stop(
+        not platform_button.value,
+        mo.md("Click **Export platform JSON** after setup."),
+    )
+
+    _engine_path = setup_status["engine"]
+    _env = os.environ.copy()
+    _env["CGM_VENV"] = str(venv_dir)
+    _env["CGM_HOME"] = str(data_root)
+    _env["CGM_STOCKFISH"] = _engine_path
+
+    _probe_code = r'''
+import json
+import sys
+
+from chessgrandmaster.benchmark import hardware_info
+from chessgrandmaster.engine_manifest import verify_engine_binary
+
+engine_path = sys.argv[1]
+
+print(json.dumps({
+    "hardware": hardware_info(),
+    "engine": verify_engine_binary(engine_path),
+}))
+'''
+
+    _runtime = json.loads(
+        subprocess.check_output(
+            [
+                str(venv_dir / "bin" / "python"),
+                "-c",
+                _probe_code,
+                _engine_path,
+            ],
+            cwd=repo_dir,
+            env=_env,
+            text=True,
+        )
+    )
+
+    _commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_dir,
+        text=True,
+    ).strip()
+
+    _report = {
+        "schema_version": "cgm-platform-probe-1",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "platform_label": "molab",
+        "git": {
+            "repository": "chessfancy/gm-analyzer-b1",
+            "branch": setup_status["branch"],
+            "commit": _commit,
+        },
+        "hardware": _runtime["hardware"],
+        "engine": _runtime["engine"],
+        "worker_policy": {
+            "threads_per_worker": 1,
+            "hash_mb_per_worker": 256,
+            "suggested_workers": _runtime["hardware"]["suggested_workers"],
+        },
+    }
+
+    _report_path = data_root / "molab_platform.json"
+    _report_path.write_text(
+        json.dumps(
+            _report,
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    platform_report_path = str(_report_path)
+
+    mo.md(
+        f"""
+        ## Molab platform probe ready
+
+        - Logical CPUs: `{_report['hardware']['logical_cpu']}`
+        - CPU quota: `{_report['hardware']['cgroup_cpu_quota']}`
+        - Effective CPU: `{_report['hardware']['effective_cpu']}`
+        - Suggested workers: `{_report['hardware']['suggested_workers']}`
+        - Memory GiB: `{_report['hardware']['memory_gib']}`
+        - JSON: `{platform_report_path}`
+
+        Download `molab_platform.json` from the Molab file browser and upload
+        it to ChatGPT for comparison with Codespaces, Deepnote and Kaggle.
+        """
+    )
+    return (platform_report_path,)
+
+
+@app.cell
 def _(data_root, mo):
     pgn_path = mo.ui.text(
         label="PGN path",
@@ -180,7 +319,10 @@ def _(
     subprocess,
     venv_dir,
 ):
-    mo.stop(not analyze_button.value, mo.md("Choose a PGN and click **Analyze PGN**."))
+    mo.stop(
+        not analyze_button.value,
+        mo.md("Choose a PGN and click **Analyze PGN**."),
+    )
 
     _input = Path(pgn_path.value).expanduser()
     if not _input.is_absolute():
@@ -196,7 +338,7 @@ def _(
 
     _analyzer = venv_dir / "bin" / "cgm-analyze"
     if not _analyzer.is_file():
-        raise RuntimeError("B1 is not set up yet; click Setup B1 first")
+        raise RuntimeError("B1 is not set up yet; click Setup / Reuse B1 first")
 
     subprocess.run(
         [str(_analyzer), str(_input)],
@@ -230,8 +372,8 @@ def _(
         **PGN output(s)**
         {_output_lines or '- none'}
 
-        Download/copy these files from Molab's file browser before the
-        session is discarded.
+        Download/copy important generated files before the Molab runtime is
+        discarded, or save them to remote storage such as S3.
         """
     )
     return (analysis_result,)
