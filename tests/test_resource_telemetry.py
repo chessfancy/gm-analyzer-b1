@@ -34,6 +34,10 @@ def test_parse_meminfo_omits_unparseable_units():
     assert parsed.get("MemAvailable") is None
 
 
+def test_unknown_vmrss_unit_is_unavailable_for_stat_fallback():
+    assert resource_telemetry._rss_from_status("10 bananas") is None
+
+
 def test_parse_cgroup_value_handles_integer_max_and_invalid_text():
     assert resource_telemetry.parse_cgroup_value("12345\n") == 12345
     assert resource_telemetry.parse_cgroup_value("max\n") is None
@@ -139,3 +143,48 @@ def test_resource_summary_aggregates_stored_samples(tmp_path):
         "minimum_mem_available_bytes": 6000,
         "max_stockfish_process_count": 4,
     }
+
+
+def test_resource_summary_closes_connection_after_query_error(tmp_path, monkeypatch):
+    closed = []
+
+    class BrokenConnection:
+        def execute(self, *args, **kwargs):
+            raise sqlite3.OperationalError("synthetic query failure")
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(
+        resource_telemetry.sqlite3,
+        "connect",
+        lambda *args, **kwargs: BrokenConnection(),
+    )
+
+    assert resource_telemetry.resource_summary(tmp_path / "analysis.sqlite", 1)[
+        "sample_count"
+    ] == 0
+    assert closed == [True]
+
+
+def test_persist_resource_sample_enforces_run_foreign_key(tmp_path):
+    db_path = tmp_path / "analysis.sqlite"
+    ensure_schema(db_path)
+    sample = resource_telemetry.collect_resource_sample(
+        root_pid=1,
+        configured_workers=2,
+        configured_hash_mb_per_worker=256,
+    )
+
+    assert resource_telemetry.persist_resource_sample(
+        db_path,
+        run_id=999,
+        sample=sample,
+    ) is False
+
+    con = sqlite3.connect(db_path)
+    count = con.execute(
+        "SELECT COUNT(*) FROM runtime_resource_samples"
+    ).fetchone()[0]
+    con.close()
+    assert count == 0

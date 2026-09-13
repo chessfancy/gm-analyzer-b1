@@ -92,7 +92,16 @@ def _rss_from_status(value):
     number = _as_int(parts[0]) if parts else None
     if number is None or number < 0:
         return None
-    multiplier = 1024 if len(parts) > 1 and parts[1].lower() == "kb" else 1
+    if len(parts) > 1:
+        multiplier = {
+            "kb": 1024,
+            "mb": 1024**2,
+            "gb": 1024**3,
+        }.get(parts[1].lower())
+        if multiplier is None:
+            return None
+    else:
+        multiplier = 1
     return number * multiplier
 
 
@@ -307,22 +316,25 @@ def persist_resource_sample(
         sample.get("stockfish_process_count"),
         sample.get("stockfish_rss_bytes"),
     )
+    con = None
     try:
         con = sqlite3.connect(db_path)
+        con.execute("PRAGMA foreign_keys=ON")
         con.execute(
             f"INSERT INTO runtime_resource_samples ({columns}) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             values,
         )
         con.commit()
-        con.close()
         return True
     except (OSError, sqlite3.Error):
-        try:
-            con.close()
-        except (UnboundLocalError, sqlite3.Error):
-            pass
         return False
+    finally:
+        if con is not None:
+            try:
+                con.close()
+            except sqlite3.Error:
+                pass
 
 
 def _empty_summary():
@@ -341,6 +353,7 @@ def _empty_summary():
 def resource_summary(db_path, run_id):
     """Aggregate persisted resource samples for one analysis run."""
     summary = _empty_summary()
+    con = None
     try:
         con = sqlite3.connect(db_path)
         row = con.execute(
@@ -359,9 +372,14 @@ def resource_summary(db_path, run_id):
             """,
             (run_id,),
         ).fetchone()
-        con.close()
     except (OSError, sqlite3.Error):
         return summary
+    finally:
+        if con is not None:
+            try:
+                con.close()
+            except sqlite3.Error:
+                pass
 
     if row is None:
         return summary
