@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <h1>Game database 1450909 POST</h1>
+    <table>
+      <tr><th>Game</th><th>dbkey</th><th>Rd</th><th>Pairing</th></tr>
+      <tr><td>Show</td><td>1450909</td><td>2</td><td>Fixture A</td></tr>
+      <tr><td>Show</td><td>1450909</td><td>5</td><td>Fixture B</td></tr>
+      <tr><td>Show</td><td>1450909</td><td>5</td><td>Fixture C</td></tr>
+      <tr><td>Show</td><td>1450909</td><td>9</td><td>Fixture D</td></tr>
+    </table>
+    <form action="/download/fixture-post" method="post">
+      <input type="hidden" name="search_token" value="post-token">
+      <input type="hidden" name="database_key" value="1450909">
+      <input type="text" name="first_round" value="0">
+      <input type="text" name="last_round" value="0">
+      <button type="submit" name="download_action" value="pgn">Download as PGN-File</button>
+    </form>
+  </body>
+</html>

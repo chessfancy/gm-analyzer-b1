@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <h1>Custom Game Search Fixture</h1>
+    <form action="/partiesuche.aspx?lang=1" method="post">
+      <input type="hidden" name="csrf_token" value="fixture-csrf">
+      <input type="hidden" name="__VIEWSTATE" value="custom-viewstate">
+      <label for="custom-db-key">Database Key *</label>
+      <input type="text" name="custom$database_key" id="custom-db-key" value="">
+      <input type="submit" name="custom$search" value="Search">
+      <input type="submit" name="custom$download" value="Download as PGN-File">
+    </form>
+  </body>
+</html>

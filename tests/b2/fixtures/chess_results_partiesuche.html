@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <h1>Game-Database of Chess Results</h1>
+    <form action="/partiesuche.aspx" method="post">
+      <input type="hidden" name="__VIEWSTATE" value="fixture-viewstate">
+      <input type="hidden" name="__EVENTVALIDATION" value="fixture-eventvalidation">
+      <input type="hidden" name="__EVENTTARGET" value="">
+      <input type="text" name="ctl00$P1$txt_dbkey" id="P1_txt_dbkey" value="">
+      <input type="text" name="ctl00$P1$txt_nachname" value="">
+      <select name="ctl00$P1$combo_anzahl_zeilen">
+        <option value="0">250</option>
+        <option value="1" selected>500</option>
+      </select>
+      <input type="submit" name="ctl00$P1$cb_SuchenPartie" value="Search">
+      <input type="submit" name="ctl00$P1$cb_DownLoadPGN" value="Download as PGN-File">
+    </form>
+  </body>
+</html>

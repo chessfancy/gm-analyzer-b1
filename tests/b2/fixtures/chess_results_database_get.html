@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <body>
+    <h1>Game database 1450909</h1>
+    <p>With this selection 6 games were found.</p>
+    <table>
+      <tr><th>Game</th><th>Database Key</th><th>Round</th><th>Pairing</th></tr>
+      <tr><td>Show</td><td>1450909</td><td>1</td><td>Fixture A</td></tr>
+      <tr><td>Show</td><td>1450909</td><td>1</td><td>Fixture B</td></tr>
+      <tr><td>Show</td><td>1450909</td><td>3</td><td>Fixture C</td></tr>
+      <tr><td>Show</td><td>1450909</td><td>7</td><td>Fixture D</td></tr>
+      <tr><td>Show</td><td>1450909</td><td>7</td><td>Fixture E</td></tr>
+      <tr><td>Show</td><td>1450909</td><td>7</td><td>Fixture F</td></tr>
+    </table>
+    <form action="/download/fixture-get?format=pgn" method="get">
+      <input type="hidden" name="session_token" value="get-token">
+      <input type="hidden" name="database_key" value="1450909">
+      <input type="text" name="round_from" value="99">
+      <input type="text" name="round_to" value="99">
+      <input type="submit" name="download_action" value="Download as PGN-File">
+    </form>
+  </body>
+</html>
