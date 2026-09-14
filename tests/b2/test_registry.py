@@ -574,3 +574,41 @@ def test_occurrence_candidates_and_display_selection_are_public_and_deterministi
             canonical_game_id,
             99999,
         )
+
+
+def test_finish_download_attempt_can_bind_downloaded_source_file(tmp_path):
+    registry = Registry(tmp_path / "registry.sqlite")
+    source_id = registry.upsert_source("fixture", "https://example.invalid")
+    tournament_id = registry.upsert_tournament("fixture-tournament")
+    source_tournament_id = registry.upsert_source_tournament(
+        source_id=source_id,
+        tournament_id=tournament_id,
+        external_id="fixture",
+    )
+    attempt_id = registry.record_download_attempt(
+        source_tournament_id=source_tournament_id,
+    )
+    source_file_id = registry.record_source_file(
+        source_tournament_id=source_tournament_id,
+        object_key="raw/fixture.pgn",
+        filename="fixture.pgn",
+        sha256="a" * 64,
+        byte_size=4,
+    )
+
+    registry.finish_download_attempt(
+        attempt_id,
+        source_file_id=source_file_id,
+        http_status=200,
+    )
+
+    attempt = rows_for(
+        registry,
+        "SELECT * FROM download_attempts WHERE id = ?",
+        (attempt_id,),
+    )[0]
+    assert attempt["source_file_id"] == source_file_id
+    assert attempt["source_tournament_id"] == source_tournament_id
+    assert attempt["finished_at"] is not None
+    assert attempt["http_status"] == 200
+    assert attempt["error"] is None

@@ -646,23 +646,61 @@ class Registry:
         self,
         attempt_id: int,
         *,
+        source_file_id: int | None = None,
         finished_at: str | None = None,
         http_status: int | None = None,
         error: str | None = None,
     ) -> None:
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT id FROM download_attempts WHERE id = ?", (attempt_id,)
+                """
+                SELECT id, source_tournament_id FROM download_attempts
+                WHERE id = ?
+                """,
+                (attempt_id,),
             ).fetchone()
             if row is None:
                 raise KeyError(f"unknown download attempt id: {attempt_id}")
+            if source_file_id is None:
+                connection.execute(
+                    """
+                    UPDATE download_attempts
+                    SET finished_at = ?, http_status = ?, error = ?
+                    WHERE id = ?
+                    """,
+                    (finished_at or _timestamp(), http_status, error, attempt_id),
+                )
+                return
+
+            source_file = connection.execute(
+                """
+                SELECT source_tournament_id FROM source_files WHERE id = ?
+                """,
+                (source_file_id,),
+            ).fetchone()
+            if source_file is None:
+                raise KeyError(f"unknown source file id: {source_file_id}")
+            if (
+                row["source_tournament_id"] is not None
+                and int(row["source_tournament_id"])
+                != int(source_file["source_tournament_id"])
+            ):
+                raise ValueError(
+                    "download attempt and source file provenance do not match"
+                )
             connection.execute(
                 """
                 UPDATE download_attempts
-                SET finished_at = ?, http_status = ?, error = ?
+                SET source_file_id = ?, finished_at = ?, http_status = ?, error = ?
                 WHERE id = ?
                 """,
-                (finished_at or _timestamp(), http_status, error, attempt_id),
+                (
+                    source_file_id,
+                    finished_at or _timestamp(),
+                    http_status,
+                    error,
+                    attempt_id,
+                ),
             )
 
     def upsert_canonical_game(
