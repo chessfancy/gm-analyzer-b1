@@ -22,6 +22,7 @@ STATES = (
     "READY",
 )
 _STATE_RANK = {state: index for index, state in enumerate(STATES)}
+_UNSET = object()
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS registry_meta (
@@ -306,7 +307,7 @@ class Registry:
         time_control_class: str | None = None,
         is_otb: bool | int | None = None,
         has_vietnamese_player: bool | int | None = None,
-        priority_score: int = 0,
+        priority_score: int | object = _UNSET,
         priority_reasons: object | None = None,
         *,
         status: str = "DISCOVERED",
@@ -321,24 +322,16 @@ class Registry:
             else priority_reasons
         )
         reasons_json = _json_text(reasons_value, [])
-        now = _timestamp()
-        fields = (
-            name,
-            site,
-            country,
-            start_date,
-            end_date,
-            time_control_class,
-            _bool_value(is_otb),
-            _bool_value(has_vietnamese_player),
-            int(priority_score),
-            reasons_json,
-            now,
+        new_priority_score = (
+            0
+            if priority_score is _UNSET or priority_score is None
+            else int(priority_score)
         )
+        now = _timestamp()
 
         with self._connect() as connection:
             existing = connection.execute(
-                "SELECT id, status FROM tournaments WHERE slug = ?", (slug,)
+                "SELECT * FROM tournaments WHERE slug = ?", (slug,)
             ).fetchone()
             if existing is None:
                 connection.execute(
@@ -351,13 +344,38 @@ class Registry:
                     )
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (slug, *fields[:-1], status, now, now),
+                    (
+                        slug,
+                        name,
+                        site,
+                        country,
+                        start_date,
+                        end_date,
+                        time_control_class,
+                        _bool_value(is_otb),
+                        _bool_value(has_vietnamese_player),
+                        new_priority_score,
+                        reasons_json,
+                        status,
+                        now,
+                        now,
+                    ),
                 )
                 return int(connection.execute(
                     "SELECT id FROM tournaments WHERE slug = ?", (slug,)
                 ).fetchone()[0])
 
             tournament_id = int(existing["id"])
+            stored_priority_score = (
+                existing["priority_score"]
+                if priority_score is _UNSET or priority_score is None
+                else int(priority_score)
+            )
+            stored_reasons_json = (
+                existing["priority_reasons_json"]
+                if reasons_value is None
+                else reasons_json
+            )
             connection.execute(
                 """
                 UPDATE tournaments
@@ -367,7 +385,28 @@ class Registry:
                     priority_reasons_json = ?, updated_at = ?
                 WHERE id = ?
                 """,
-                (*fields, tournament_id),
+                (
+                    existing["name"] if name is None else name,
+                    existing["site"] if site is None else site,
+                    existing["country"] if country is None else country,
+                    existing["start_date"] if start_date is None else start_date,
+                    existing["end_date"] if end_date is None else end_date,
+                    (
+                        existing["time_control_class"]
+                        if time_control_class is None
+                        else time_control_class
+                    ),
+                    existing["is_otb"] if is_otb is None else _bool_value(is_otb),
+                    (
+                        existing["has_vietnamese_player"]
+                        if has_vietnamese_player is None
+                        else _bool_value(has_vietnamese_player)
+                    ),
+                    stored_priority_score,
+                    stored_reasons_json,
+                    now,
+                    tournament_id,
+                ),
             )
             current_status = _state(str(existing["status"]))
             if _STATE_RANK[status] > _STATE_RANK[current_status]:
@@ -415,7 +454,7 @@ class Registry:
         with self._connect() as connection:
             existing = connection.execute(
                 """
-                SELECT id FROM source_tournaments
+                SELECT id, tournament_id FROM source_tournaments
                 WHERE source_id = ? AND external_id = ?
                 """,
                 (source_id, external_id),
@@ -449,15 +488,18 @@ class Registry:
                 return int(row[0])
 
             source_tournament_id = int(existing[0])
+            if int(existing["tournament_id"]) != int(tournament_id):
+                raise ValueError(
+                    "source tournament identity cannot move between tournaments"
+                )
             connection.execute(
                 """
                 UPDATE source_tournaments
-                SET tournament_id = ?, source_url = COALESCE(?, source_url),
+                SET source_url = COALESCE(?, source_url),
                     pgn_url = COALESCE(?, pgn_url), last_seen_at = ?
                 WHERE id = ?
                 """,
                 (
-                    tournament_id,
                     source_url,
                     pgn_url,
                     last_seen_at,
@@ -725,14 +767,33 @@ class Registry:
         headers_json = _json_text(raw_headers, {})
         discovered_at = discovered_at or _timestamp()
         with self._connect() as connection:
+            source_file = connection.execute(
+                "SELECT tournament_id FROM source_files WHERE id = ?",
+                (source_file_id,),
+            ).fetchone()
+            if source_file is None:
+                raise ValueError(f"unknown source file id: {source_file_id}")
+            if (
+                source_file["tournament_id"] is None
+                or int(source_file["tournament_id"]) != int(tournament_id)
+            ):
+                raise ValueError(
+                    "source file provenance does not match tournament"
+                )
+
             existing = connection.execute(
                 """
-                SELECT id, canonical_game_id FROM game_occurrences
+                SELECT id, canonical_game_id, tournament_id
+                FROM game_occurrences
                 WHERE source_file_id = ? AND source_game_index = ?
                 """,
                 (source_file_id, int(source_game_index)),
             ).fetchone()
             if existing is not None:
+                if int(existing["tournament_id"]) != int(tournament_id):
+                    raise ValueError(
+                        "existing occurrence provenance does not match tournament"
+                    )
                 existing_game_id = existing["canonical_game_id"]
                 if (
                     existing_game_id is not None
@@ -886,6 +947,35 @@ class Registry:
             )
             return int(cursor.lastrowid), next_number
 
+    @staticmethod
+    def _validate_selected_occurrence(
+        connection: sqlite3.Connection,
+        revision_tournament_id: int,
+        canonical_game_id: int,
+        occurrence_id: int,
+    ) -> None:
+        occurrence = connection.execute(
+            """
+            SELECT canonical_game_id, tournament_id, is_valid
+            FROM game_occurrences WHERE id = ?
+            """,
+            (occurrence_id,),
+        ).fetchone()
+        if occurrence is None:
+            raise ValueError("selected occurrence does not exist")
+        if (
+            occurrence["canonical_game_id"] is None
+            or int(occurrence["canonical_game_id"]) != int(canonical_game_id)
+        ):
+            raise ValueError("selected occurrence does not belong to canonical game")
+        if (
+            occurrence["tournament_id"] is None
+            or int(occurrence["tournament_id"]) != int(revision_tournament_id)
+        ):
+            raise ValueError("selected occurrence is not from revision tournament")
+        if int(occurrence["is_valid"]) != 1:
+            raise ValueError("selected occurrence must be valid")
+
     def set_revision_games(
         self,
         revision_id: int,
@@ -904,7 +994,8 @@ class Registry:
 
         with self._connect() as connection:
             revision = connection.execute(
-                "SELECT id FROM tournament_revisions WHERE id = ?", (revision_id,)
+                "SELECT id, tournament_id FROM tournament_revisions WHERE id = ?",
+                (revision_id,),
             ).fetchone()
             if revision is None:
                 raise KeyError(f"unknown tournament revision id: {revision_id}")
@@ -917,17 +1008,12 @@ class Registry:
                     raise KeyError(f"unknown canonical game id: {game_id}")
                 occurrence_id = selected_occurrence_ids.get(game_id)
                 if occurrence_id is not None:
-                    occurrence = connection.execute(
-                        """
-                        SELECT id FROM game_occurrences
-                        WHERE id = ? AND canonical_game_id = ?
-                        """,
-                        (occurrence_id, game_id),
-                    ).fetchone()
-                    if occurrence is None:
-                        raise ValueError(
-                            "selected occurrence does not belong to canonical game"
-                        )
+                    self._validate_selected_occurrence(
+                        connection,
+                        int(revision["tournament_id"]),
+                        game_id,
+                        int(occurrence_id),
+                    )
 
             connection.execute(
                 "DELETE FROM tournament_games WHERE revision_id = ?",
@@ -959,7 +1045,8 @@ class Registry:
     ) -> int:
         with self._connect() as connection:
             revision = connection.execute(
-                "SELECT id FROM tournament_revisions WHERE id = ?", (revision_id,)
+                "SELECT id, tournament_id FROM tournament_revisions WHERE id = ?",
+                (revision_id,),
             ).fetchone()
             if revision is None:
                 raise KeyError(f"unknown tournament revision id: {revision_id}")
@@ -969,17 +1056,12 @@ class Registry:
             if game is None:
                 raise KeyError(f"unknown canonical game id: {canonical_game_id}")
             if selected_occurrence_id is not None:
-                occurrence = connection.execute(
-                    """
-                    SELECT id FROM game_occurrences
-                    WHERE id = ? AND canonical_game_id = ?
-                    """,
-                    (selected_occurrence_id, canonical_game_id),
-                ).fetchone()
-                if occurrence is None:
-                    raise ValueError(
-                        "selected occurrence does not belong to canonical game"
-                    )
+                self._validate_selected_occurrence(
+                    connection,
+                    int(revision["tournament_id"]),
+                    canonical_game_id,
+                    int(selected_occurrence_id),
+                )
 
             existing = connection.execute(
                 """

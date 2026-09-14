@@ -256,3 +256,232 @@ def test_tournament_status_is_validated_and_does_not_regress(tmp_path):
         registry.set_tournament_status(tournament_id, "NOT_A_STATE")
     with pytest.raises(ValueError):
         registry.set_tournament_status(tournament_id, "VALIDATED")
+
+
+def _provenance_fixture(tmp_path):
+    registry = Registry(tmp_path / "registry.sqlite")
+    source_id = registry.upsert_source("fixture", "https://example.invalid")
+    tournament_a = registry.upsert_tournament("tournament-a", name="A")
+    tournament_b = registry.upsert_tournament("tournament-b", name="B")
+    source_tournament_a = registry.upsert_source_tournament(
+        source_id=source_id,
+        tournament_id=tournament_a,
+        external_id="section-a",
+        source_url="https://example.invalid/a",
+    )
+    source_tournament_b = registry.upsert_source_tournament(
+        source_id=source_id,
+        tournament_id=tournament_b,
+        external_id="section-b",
+        source_url="https://example.invalid/b",
+    )
+    source_file_a = registry.record_source_file(
+        source_tournament_id=source_tournament_a,
+        object_key="raw/a/original.pgn",
+        filename="a.pgn",
+        sha256="a" * 64,
+        byte_size=1,
+    )
+    source_file_b = registry.record_source_file(
+        source_tournament_id=source_tournament_b,
+        object_key="raw/b/original.pgn",
+        filename="b.pgn",
+        sha256="b" * 64,
+        byte_size=1,
+    )
+    canonical_game_id = registry.upsert_canonical_game(
+        fingerprint_version="game_fingerprint_v1",
+        fingerprint="c" * 64,
+        variant="standard",
+        initial_fen="start-fen",
+        mainline_uci=("e2e4",),
+        ply_count=1,
+    )
+    return (
+        registry,
+        tournament_a,
+        tournament_b,
+        source_file_a,
+        source_file_b,
+        canonical_game_id,
+    )
+
+
+def test_source_tournament_cannot_move_between_tournaments(tmp_path):
+    registry = Registry(tmp_path / "registry.sqlite")
+    source_id = registry.upsert_source("fixture", "https://example.invalid")
+    tournament_a = registry.upsert_tournament("tournament-a")
+    tournament_b = registry.upsert_tournament("tournament-b")
+    source_tournament_id = registry.upsert_source_tournament(
+        source_id=source_id,
+        tournament_id=tournament_a,
+        external_id="same-external-id",
+    )
+
+    with pytest.raises(ValueError, match="tournament"):
+        registry.upsert_source_tournament(
+            source_id=source_id,
+            tournament_id=tournament_b,
+            external_id="same-external-id",
+        )
+
+    row = rows_for(
+        registry,
+        "SELECT tournament_id FROM source_tournaments WHERE id = ?",
+        (source_tournament_id,),
+    )[0]
+    assert row[0] == tournament_a
+
+
+def test_occurrence_requires_existing_source_file_and_matching_tournament(tmp_path):
+    (
+        registry,
+        tournament_a,
+        tournament_b,
+        source_file_a,
+        source_file_b,
+        canonical_game_id,
+    ) = _provenance_fixture(tmp_path)
+
+    with pytest.raises(ValueError, match="source file"):
+        registry.record_occurrence(
+            canonical_game_id=canonical_game_id,
+            tournament_id=tournament_a,
+            source_file_id=99999,
+            source_game_index=1,
+        )
+
+    with pytest.raises(ValueError, match="tournament"):
+        registry.record_occurrence(
+            canonical_game_id=canonical_game_id,
+            tournament_id=tournament_a,
+            source_file_id=source_file_b,
+            source_game_index=1,
+        )
+
+    occurrence_id = registry.record_occurrence(
+        canonical_game_id=canonical_game_id,
+        tournament_id=tournament_a,
+        source_file_id=source_file_a,
+        source_game_index=1,
+    )
+    with pytest.raises(ValueError, match="tournament"):
+        registry.record_occurrence(
+            canonical_game_id=canonical_game_id,
+            tournament_id=tournament_b,
+            source_file_id=source_file_a,
+            source_game_index=1,
+        )
+    assert registry.get_occurrences(canonical_game_id)[0]["id"] == occurrence_id
+
+
+def test_selected_revision_occurrence_must_be_local_and_valid(tmp_path):
+    (
+        registry,
+        tournament_a,
+        tournament_b,
+        source_file_a,
+        source_file_b,
+        canonical_game_id,
+    ) = _provenance_fixture(tmp_path)
+    occurrence_a = registry.record_occurrence(
+        canonical_game_id=canonical_game_id,
+        tournament_id=tournament_a,
+        source_file_id=source_file_a,
+        source_game_index=1,
+    )
+    occurrence_b = registry.record_occurrence(
+        canonical_game_id=canonical_game_id,
+        tournament_id=tournament_b,
+        source_file_id=source_file_b,
+        source_game_index=1,
+    )
+    invalid_occurrence_a = registry.record_occurrence(
+        canonical_game_id=canonical_game_id,
+        tournament_id=tournament_a,
+        source_file_id=source_file_a,
+        source_game_index=2,
+        is_valid=False,
+    )
+    revision_a, _ = registry.create_or_get_revision(
+        tournament_id=tournament_a,
+        canonical_sha256="d" * 64,
+        canonicalization_policy="canonical_pgn_v1",
+    )
+
+    with pytest.raises(ValueError, match="tournament"):
+        registry.set_revision_games(
+            revision_a,
+            [canonical_game_id],
+            {canonical_game_id: occurrence_b},
+        )
+    with pytest.raises(ValueError, match="tournament"):
+        registry.add_revision_game(
+            revision_a,
+            canonical_game_id,
+            selected_occurrence_id=occurrence_b,
+        )
+    with pytest.raises(ValueError, match="valid"):
+        registry.set_revision_games(
+            revision_a,
+            [canonical_game_id],
+            {canonical_game_id: invalid_occurrence_a},
+        )
+    with pytest.raises(ValueError, match="valid"):
+        registry.add_revision_game(
+            revision_a,
+            canonical_game_id,
+            selected_occurrence_id=invalid_occurrence_a,
+        )
+
+    registry.set_revision_games(
+        revision_a,
+        [canonical_game_id],
+        {canonical_game_id: occurrence_a},
+    )
+    assert registry.get_revision_games(revision_a)[0]["selected_occurrence_id"] == occurrence_a
+
+
+def test_minimal_tournament_upsert_preserves_metadata_and_priority(tmp_path):
+    registry = Registry(tmp_path / "registry.sqlite")
+    tournament_id = registry.upsert_tournament(
+        slug="rich-tournament",
+        name="Rich Tournament",
+        site="https://example.invalid/event",
+        country="VIE",
+        start_date="2026-01-01",
+        end_date="2026-01-03",
+        time_control_class="classical",
+        is_otb=True,
+        has_vietnamese_player=True,
+        priority_score=165,
+        priority_reasons=["player_federation:VIE"],
+        status="DOWNLOADED",
+    )
+
+    registry.upsert_tournament("rich-tournament", status="DISCOVERED")
+    preserved = registry.get_tournament(tournament_id)
+    assert preserved["name"] == "Rich Tournament"
+    assert preserved["site"] == "https://example.invalid/event"
+    assert preserved["country"] == "VIE"
+    assert preserved["start_date"] == "2026-01-01"
+    assert preserved["end_date"] == "2026-01-03"
+    assert preserved["time_control_class"] == "classical"
+    assert preserved["is_otb"] == 1
+    assert preserved["has_vietnamese_player"] == 1
+    assert preserved["priority_score"] == 165
+    assert preserved["priority_reasons_json"] == '["player_federation:VIE"]'
+    assert preserved["status"] == "DOWNLOADED"
+
+    registry.upsert_tournament(
+        "rich-tournament",
+        is_otb=False,
+        has_vietnamese_player=False,
+        priority_score=0,
+        priority_reasons=[],
+    )
+    explicit_values = registry.get_tournament(tournament_id)
+    assert explicit_values["is_otb"] == 0
+    assert explicit_values["has_vietnamese_player"] == 0
+    assert explicit_values["priority_score"] == 0
+    assert explicit_values["priority_reasons_json"] == "[]"

@@ -663,6 +663,8 @@ source_game_index ASC
 
 Store the selected occurrence ID on `canonical_games.canonical_occurrence_id`. This prevents canonical headers from depending on ingestion order.
 
+> **Recorded ruling for Task 6:** `canonical_games.canonical_occurrence_id` is an optional global best provenance/display occurrence. `tournament_games.selected_occurrence_id` is the tournament-local occurrence and is the occurrence that the canonical tournament PGN must use. These fields are intentionally distinct.
+
 - [ ] **Step 5: Implement deterministic canonical PGN projection**
 
 For each revision member in original tournament order:
