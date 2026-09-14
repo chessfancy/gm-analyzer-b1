@@ -582,6 +582,16 @@ class Registry:
             ).fetchone()
             return int(row[0])
 
+    def get_source_file(self, source_file_id: int) -> dict[str, object]:
+        """Return immutable source-file provenance as a plain dictionary."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM source_files WHERE id = ?", (source_file_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"unknown source file id: {source_file_id}")
+            return _row_dict(row)
+
     def record_download_attempt(
         self,
         source_file_id: int | None = None,
@@ -827,6 +837,40 @@ class Registry:
                 ),
             )
             return int(cursor.lastrowid)
+
+    def list_valid_occurrence_candidates(
+        self,
+        canonical_game_id: int,
+        *,
+        tournament_id: int | None = None,
+    ) -> list[dict[str, object]]:
+        """List valid occurrences with source precedence metadata.
+
+        The ordering is the canonical global/display precedence used by B2:
+        source priority descending, then source name and file SHA ascending,
+        then the source-local game index.
+        """
+        parameters: list[object] = [canonical_game_id]
+        tournament_clause = ""
+        if tournament_id is not None:
+            tournament_clause = " AND go.tournament_id = ?"
+            parameters.append(tournament_id)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT go.*, sf.sha256 AS source_file_sha256,
+                       s.name AS source_name, s.priority AS source_priority
+                FROM game_occurrences AS go
+                JOIN source_files AS sf ON sf.id = go.source_file_id
+                JOIN sources AS s ON s.id = sf.source_id
+                WHERE go.canonical_game_id = ? AND go.is_valid = 1
+                {tournament_clause}
+                ORDER BY s.priority DESC, s.name ASC, sf.sha256 ASC,
+                         go.source_game_index ASC, go.id ASC
+                """,
+                tuple(parameters),
+            ).fetchall()
+            return [_row_dict(row) for row in rows]
 
     def replace_metadata_conflicts(
         self,
@@ -1138,6 +1182,59 @@ class Registry:
                 (fingerprint_version, fingerprint),
             ).fetchone()
             return None if row is None else _row_dict(row)
+
+    def get_canonical_game_by_id(
+        self, canonical_game_id: int
+    ) -> dict[str, object] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM canonical_games WHERE id = ?",
+                (canonical_game_id,),
+            ).fetchone()
+            return None if row is None else _row_dict(row)
+
+    def set_canonical_display_occurrence(
+        self,
+        canonical_game_id: int,
+        occurrence_id: int,
+        canonical_headers: object | None = None,
+    ) -> None:
+        """Set the global display occurrence and copied source headers."""
+        with self._connect() as connection:
+            game = connection.execute(
+                "SELECT id FROM canonical_games WHERE id = ?",
+                (canonical_game_id,),
+            ).fetchone()
+            if game is None:
+                raise KeyError(f"unknown canonical game id: {canonical_game_id}")
+            occurrence = connection.execute(
+                """
+                SELECT canonical_game_id, is_valid, raw_headers_json
+                FROM game_occurrences WHERE id = ?
+                """,
+                (occurrence_id,),
+            ).fetchone()
+            if (
+                occurrence is None
+                or occurrence["canonical_game_id"] is None
+                or int(occurrence["canonical_game_id"]) != int(canonical_game_id)
+                or int(occurrence["is_valid"]) != 1
+            ):
+                raise ValueError("canonical display occurrence must be a valid occurrence")
+            headers_json = _json_text(
+                occurrence["raw_headers_json"]
+                if canonical_headers is None
+                else canonical_headers,
+                {},
+            )
+            connection.execute(
+                """
+                UPDATE canonical_games
+                SET canonical_occurrence_id = ?, canonical_headers_json = ?
+                WHERE id = ?
+                """,
+                (occurrence_id, headers_json, canonical_game_id),
+            )
 
     def get_occurrences(self, canonical_game_id: int) -> list[dict[str, object]]:
         with self._connect() as connection:

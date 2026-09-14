@@ -3,6 +3,7 @@ import sqlite3
 
 import pytest
 
+from chessgrandmaster.b2.identity import GameIdentity
 from chessgrandmaster.b2.json_codec import canonical_json_bytes
 from chessgrandmaster.b2.registry import Registry
 
@@ -485,3 +486,91 @@ def test_minimal_tournament_upsert_preserves_metadata_and_priority(tmp_path):
     assert explicit_values["has_vietnamese_player"] == 0
     assert explicit_values["priority_score"] == 0
     assert explicit_values["priority_reasons_json"] == "[]"
+
+
+def test_occurrence_candidates_and_display_selection_are_public_and_deterministic(
+    tmp_path,
+):
+    registry = Registry(tmp_path / "registry.sqlite")
+    tournament_low = registry.upsert_tournament("low-tournament")
+    tournament_high = registry.upsert_tournament("high-tournament")
+    source_low = registry.upsert_source(
+        "secondary", "https://secondary.invalid", priority=10
+    )
+    source_high = registry.upsert_source(
+        "official", "https://official.invalid", priority=50
+    )
+    source_tournament_low = registry.upsert_source_tournament(
+        source_id=source_low,
+        tournament_id=tournament_low,
+        external_id="low",
+    )
+    source_tournament_high = registry.upsert_source_tournament(
+        source_id=source_high,
+        tournament_id=tournament_high,
+        external_id="high",
+    )
+    low_file = registry.record_source_file(
+        source_tournament_id=source_tournament_low,
+        object_key="raw/low.pgn",
+        filename="low.pgn",
+        sha256="a" * 64,
+        byte_size=10,
+    )
+    high_file = registry.record_source_file(
+        source_tournament_id=source_tournament_high,
+        object_key="raw/high.pgn",
+        filename="high.pgn",
+        sha256="b" * 64,
+        byte_size=20,
+    )
+    identity = GameIdentity(
+        fingerprint_version="game_fingerprint_v1",
+        fingerprint="f" * 64,
+        variant="standard",
+        initial_fen="rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -",
+        mainline_uci=("e2e4",),
+        ply_count=1,
+    )
+    canonical_game_id = registry.upsert_canonical_game(identity)
+    low_occurrence_id = registry.record_occurrence(
+        tournament_id=tournament_low,
+        source_file_id=low_file,
+        source_game_index=1,
+        canonical_game_id=canonical_game_id,
+        raw_pgn_object_key="raw/low.pgn",
+        raw_headers={"Event": "Low"},
+    )
+    high_occurrence_id = registry.record_occurrence(
+        tournament_id=tournament_high,
+        source_file_id=high_file,
+        source_game_index=1,
+        canonical_game_id=canonical_game_id,
+        raw_pgn_object_key="raw/high.pgn",
+        raw_headers={"Event": "High"},
+    )
+
+    assert registry.get_source_file(high_file)["sha256"] == "b" * 64
+    candidates = registry.list_valid_occurrence_candidates(canonical_game_id)
+    assert [candidate["id"] for candidate in candidates] == [
+        high_occurrence_id,
+        low_occurrence_id,
+    ]
+    assert candidates[0]["source_name"] == "official"
+    assert candidates[0]["source_priority"] == 50
+    assert candidates[0]["source_file_sha256"] == "b" * 64
+    assert candidates[0]["tournament_id"] == tournament_high
+
+    registry.set_canonical_display_occurrence(
+        canonical_game_id,
+        low_occurrence_id,
+    )
+    selected = registry.get_canonical_game_by_id(canonical_game_id)
+    assert selected["canonical_occurrence_id"] == low_occurrence_id
+    assert json.loads(selected["canonical_headers_json"]) == {"Event": "Low"}
+
+    with pytest.raises(ValueError, match="valid occurrence"):
+        registry.set_canonical_display_occurrence(
+            canonical_game_id,
+            99999,
+        )
