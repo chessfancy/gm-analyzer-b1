@@ -16,6 +16,8 @@ dependencies = [
 cgm-analyze = "chessgrandmaster.cli:main"
 cgm-engine = "chessgrandmaster.engine_manifest:main"
 cgm-bench = "chessgrandmaster.benchmark_cli:main"
+cgm-acquire = "chessgrandmaster.b2.cli_acquire:main"
+cgm-registry = "chessgrandmaster.b2.cli_registry:main"
 
 [project.optional-dependencies]
 dev = [

@@ -392,3 +392,21 @@ def test_canonicalization_failure_preserves_raw_source_and_prior_revision(tmp_pa
     assert _count(registry, "source_files") == 1
     assert _count(registry, "download_attempts") == 2
     assert _rows(registry, "download_attempts")[-1]["error"] is None
+
+
+def test_result_status_reflects_actual_registry_state_without_regression(tmp_path):
+    service, registry, _, _ = _service(tmp_path)
+
+    first = service.acquire("tnr1450909")
+    assert first.tournament_status == "CANONICALIZED"
+
+    registry.set_tournament_status(first.tournament_id, "SHARDED")
+    registry.set_tournament_status(first.tournament_id, "READY")
+
+    second = service.acquire("tnr1450909")
+
+    assert registry.get_tournament_status(first.tournament_id) == "READY"
+    assert second.tournament_status == "READY"
+    assert second.tournament_id == first.tournament_id
+    assert second.revision_id == first.revision_id
+    assert second.canonical_sha256 == first.canonical_sha256

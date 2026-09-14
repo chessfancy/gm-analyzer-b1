@@ -23,6 +23,18 @@ STATES = (
 )
 _STATE_RANK = {state: index for index, state in enumerate(STATES)}
 _UNSET = object()
+_COUNTED_TABLES = (
+    "sources",
+    "tournaments",
+    "source_tournaments",
+    "source_files",
+    "download_attempts",
+    "canonical_games",
+    "game_occurrences",
+    "game_metadata_conflicts",
+    "tournament_revisions",
+    "tournament_games",
+)
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS registry_meta (
@@ -1315,3 +1327,189 @@ class Registry:
 
     def get_revision_membership(self, revision_id: int) -> list[dict[str, object]]:
         return self.get_revision_games(revision_id)
+
+    def registry_counts(self) -> dict[str, int]:
+        """Return row counts for every B2a registry table."""
+        with self._connect() as connection:
+            return {
+                table: int(
+                    connection.execute(
+                        f"SELECT COUNT(*) FROM {table}"
+                    ).fetchone()[0]
+                )
+                for table in _COUNTED_TABLES
+            }
+
+    def tournament_status_counts(self) -> dict[str, int]:
+        """Return counts for every state, including zero-valued states."""
+        counts = {state: 0 for state in STATES}
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT status, COUNT(*) FROM tournaments GROUP BY status"
+            ).fetchall()
+        for status, count in rows:
+            counts[_state(str(status))] = int(count)
+        return counts
+
+    def list_tournaments(self, limit: int | None = None) -> list[dict[str, object]]:
+        """List tournaments newest-last for scheduler/audit summaries."""
+        query = """
+            SELECT id, slug, name, status, priority_score, updated_at
+            FROM tournaments ORDER BY id
+        """
+        parameters: tuple[object, ...] = ()
+        if limit is not None:
+            if int(limit) < 1:
+                raise ValueError("tournament list limit must be at least 1")
+            query += " LIMIT ?"
+            parameters = (int(limit),)
+        with self._connect() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        return [
+            {
+                "id": int(row["id"]),
+                "slug": row["slug"],
+                "name": row["name"],
+                "status": _state(str(row["status"])),
+                "priority_score": int(row["priority_score"]),
+                "updated_at": row["updated_at"],
+            }
+            for row in rows
+        ]
+
+    def list_source_tournaments_for_tournament(
+        self, tournament_id: int
+    ) -> list[dict[str, object]]:
+        """List provider-level source references for one tournament."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT st.id, st.external_id, st.source_url, st.pgn_url,
+                       st.discovered_at, st.last_seen_at,
+                       s.id AS source_id, s.name AS source_name
+                FROM source_tournaments AS st
+                JOIN sources AS s ON s.id = st.source_id
+                WHERE st.tournament_id = ?
+                ORDER BY s.name, st.external_id, st.id
+                """,
+                (tournament_id,),
+            ).fetchall()
+        return [
+            {
+                "id": int(row["id"]),
+                "source_id": int(row["source_id"]),
+                "source_name": row["source_name"],
+                "external_id": row["external_id"],
+                "source_url": row["source_url"],
+                "pgn_url": row["pgn_url"],
+                "discovered_at": row["discovered_at"],
+                "last_seen_at": row["last_seen_at"],
+            }
+            for row in rows
+        ]
+
+    def list_source_files_for_tournament(
+        self, tournament_id: int
+    ) -> list[dict[str, object]]:
+        """List immutable raw source files for one tournament."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, source_tournament_id, object_key, filename, sha256,
+                       byte_size, content_type, status, downloaded_at
+                FROM source_files
+                WHERE tournament_id = ?
+                ORDER BY id
+                """,
+                (tournament_id,),
+            ).fetchall()
+        return [
+            {
+                "id": int(row["id"]),
+                "source_tournament_id": (
+                    None
+                    if row["source_tournament_id"] is None
+                    else int(row["source_tournament_id"])
+                ),
+                "object_key": row["object_key"],
+                "filename": row["filename"],
+                "sha256": row["sha256"],
+                "byte_size": int(row["byte_size"]),
+                "content_type": row["content_type"],
+                "status": row["status"],
+                "downloaded_at": row["downloaded_at"],
+            }
+            for row in rows
+        ]
+
+    def list_revisions_for_tournament(
+        self, tournament_id: int
+    ) -> list[dict[str, object]]:
+        """List canonical revisions with membership counts."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT tr.id, tr.revision_number, tr.canonical_sha256,
+                       tr.canonicalization_policy, tr.created_at,
+                       COUNT(tg.id) AS game_count
+                FROM tournament_revisions AS tr
+                LEFT JOIN tournament_games AS tg ON tg.revision_id = tr.id
+                WHERE tr.tournament_id = ?
+                GROUP BY tr.id
+                ORDER BY tr.revision_number, tr.id
+                """,
+                (tournament_id,),
+            ).fetchall()
+        return [
+            {
+                "revision_id": int(row["id"]),
+                "revision_number": int(row["revision_number"]),
+                "canonical_sha256": row["canonical_sha256"],
+                "canonicalization_policy": row["canonicalization_policy"],
+                "game_count": int(row["game_count"]),
+                "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+
+    def get_tournament_summary(self, tournament_id: int) -> dict[str, object]:
+        """Return one JSON-serializable tournament audit summary."""
+        try:
+            row = self.get_tournament(tournament_id)
+        except KeyError as exc:
+            raise KeyError(f"unknown tournament id: {tournament_id}") from exc
+
+        try:
+            reasons = json.loads(str(row["priority_reasons_json"]))
+        except json.JSONDecodeError as exc:
+            raise ValueError("stored tournament priority reasons are invalid") from exc
+        if not isinstance(reasons, list):
+            raise ValueError("stored tournament priority reasons must be a JSON array")
+
+        def optional_int(value: object) -> int | None:
+            return None if value is None else int(value)  # type: ignore[arg-type]
+
+        return {
+            "tournament": {
+                "id": int(row["id"]),
+                "slug": row["slug"],
+                "name": row["name"],
+                "site": row["site"],
+                "country": row["country"],
+                "start_date": row["start_date"],
+                "end_date": row["end_date"],
+                "time_control_class": row["time_control_class"],
+                "is_otb": optional_int(row["is_otb"]),
+                "has_vietnamese_player": optional_int(row["has_vietnamese_player"]),
+                "priority_score": int(row["priority_score"]),
+                "priority_reasons": reasons,
+                "status": _state(str(row["status"])),
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            },
+            "source_tournaments": self.list_source_tournaments_for_tournament(
+                tournament_id
+            ),
+            "source_files": self.list_source_files_for_tournament(tournament_id),
+            "revisions": self.list_revisions_for_tournament(tournament_id),
+        }

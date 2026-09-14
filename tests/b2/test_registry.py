@@ -612,3 +612,77 @@ def test_finish_download_attempt_can_bind_downloaded_source_file(tmp_path):
     assert attempt["finished_at"] is not None
     assert attempt["http_status"] == 200
     assert attempt["error"] is None
+
+
+def test_registry_status_read_apis_return_plain_json_primitives(tmp_path):
+    registry = Registry(tmp_path / "registry.sqlite")
+    source_id = registry.upsert_source("chess-results", "https://chess-results.com")
+
+    counts = registry.registry_counts()
+    status_counts = registry.tournament_status_counts()
+    assert set(counts) == {
+        "sources",
+        "tournaments",
+        "source_tournaments",
+        "source_files",
+        "download_attempts",
+        "canonical_games",
+        "game_occurrences",
+        "game_metadata_conflicts",
+        "tournament_revisions",
+        "tournament_games",
+    }
+    assert counts["sources"] == 1
+    assert all(value == 0 for key, value in counts.items() if key != "sources")
+    assert set(status_counts) == {
+        "DISCOVERED",
+        "DOWNLOADED",
+        "VALIDATED",
+        "CANONICALIZED",
+        "SHARDED",
+        "READY",
+    }
+    assert all(value == 0 for value in status_counts.values())
+    assert registry.list_tournaments() == []
+    assert registry.list_source_tournaments_for_tournament(1) == []
+    assert registry.list_source_files_for_tournament(1) == []
+    assert registry.list_revisions_for_tournament(1) == []
+    with pytest.raises(KeyError):
+        registry.get_tournament_summary(1)
+
+    low = registry.upsert_tournament(
+        "low",
+        name="Low",
+        priority_score=10,
+        priority_reasons=("time_control:classical",),
+        status="DISCOVERED",
+    )
+    high = registry.upsert_tournament("high", name="High", status="DOWNLOADED")
+    registry.upsert_source_tournament(
+        source_id=source_id,
+        tournament_id=high,
+        external_id="tnr1450909",
+        source_url="https://chess-results.com/tnr1450909.aspx",
+    )
+    summary = registry.get_tournament_summary(high)
+
+    assert [row["id"] for row in registry.list_tournaments()] == [low, high]
+    assert [row["slug"] for row in registry.list_tournaments(limit=1)] == ["low"]
+    with pytest.raises(ValueError, match="limit"):
+        registry.list_tournaments(limit=0)
+    assert registry.tournament_status_counts()["DOWNLOADED"] == 1
+    assert registry.tournament_status_counts()["DISCOVERED"] == 1
+    assert registry.tournament_status_counts()["READY"] == 0
+    assert summary["tournament"]["id"] == high
+    assert summary["tournament"]["status"] == "DOWNLOADED"
+    assert summary["tournament"]["priority_score"] == 0
+    assert summary["tournament"]["priority_reasons"] == []
+    assert summary["source_tournaments"][0]["external_id"] == "tnr1450909"
+    assert summary["source_tournaments"][0]["source_name"] == "chess-results"
+    assert summary["source_tournaments"][0]["source_id"] == source_id
+    low_summary = registry.get_tournament_summary(low)
+    assert low_summary["tournament"]["priority_reasons"] == [
+        "time_control:classical"
+    ]
+    assert low_summary["source_tournaments"] == []
+    assert json.loads(json.dumps(summary)) == summary

@@ -307,6 +307,7 @@ class AcquisitionService:
                 canonical_path,
             )
             self._advance_status(tournament_id, "CANONICALIZED")
+            final_status = self.registry.get_tournament_status(tournament_id)
 
         return AcquisitionResult(
             source_ref=source_ref,
@@ -324,7 +325,7 @@ class AcquisitionService:
             canonical_game_count=canonical_result.game_count,
             canonical_ply_count=canonical_result.ply_count,
             canonical_path=canonical_result.canonical_path,
-            tournament_status="CANONICALIZED",
+            tournament_status=final_status,
             source_game_count=validation.source_game_count,
             valid_game_count=validation.valid_game_count,
             invalid_game_count=validation.invalid_game_count,
