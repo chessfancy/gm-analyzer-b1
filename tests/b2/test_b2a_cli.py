@@ -495,6 +495,24 @@ def test_registry_status_does_not_initialize_existing_partial_file(tmp_path, cap
         ).fetchall() == [("sentinel",)]
 
 
+def test_registry_status_rejects_unsupported_schema_version(tmp_path, capsys):
+    registry_path = tmp_path / "unsupported.sqlite"
+    Registry(registry_path)
+    with sqlite3.connect(registry_path) as connection:
+        connection.execute("PRAGMA user_version = 2")
+    before_bytes = registry_path.read_bytes()
+
+    exit_code = cli_registry.main(["status", "--registry", str(registry_path)])
+
+    payload = _stdout_json(capsys)
+    assert exit_code != 0
+    assert payload["ok"] is False
+    assert payload["error"]["type"] == "RuntimeError"
+    assert "unsupported registry schema version: 2" in payload["error"]["message"]
+    assert "Traceback" not in json.dumps(payload)
+    assert registry_path.read_bytes() == before_bytes
+
+
 def test_cli_commands_do_not_invoke_b1_analysis(
     tmp_path, capsys, fixture_adapters
 ):

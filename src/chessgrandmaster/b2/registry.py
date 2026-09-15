@@ -263,6 +263,19 @@ class Registry:
         registry = cls.__new__(cls)
         registry.path = registry_path
         registry._read_only = True
+        with registry._connect() as connection:
+            user_version = connection.execute("PRAGMA user_version").fetchone()[0]
+            if user_version != REGISTRY_SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"unsupported registry schema version: {user_version}"
+                )
+            row = connection.execute(
+                "SELECT value FROM registry_meta WHERE key = 'schema_version'"
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("registry schema version metadata is missing")
+            if row[0] != str(REGISTRY_SCHEMA_VERSION):
+                raise RuntimeError(f"unsupported registry schema version: {row[0]}")
         return registry
 
     def _connect(self) -> sqlite3.Connection:
