@@ -12,8 +12,11 @@ from .name_filter import (
 from .chess_results import (
     ChessResultsCandidate,
     ChessResultsDiscovery,
+    CorpusDiscoveryResult,
+    CorpusWindow,
     DiscoveryResult,
     PlayerEvidence,
+    merge_corpus_priority,
 )
 from .acquire import (
     CandidateAcquisition,
@@ -31,8 +34,11 @@ __all__ = [
     "vietnamese_name_hint",
     "ChessResultsCandidate",
     "ChessResultsDiscovery",
+    "CorpusDiscoveryResult",
+    "CorpusWindow",
     "DiscoveryResult",
     "PlayerEvidence",
+    "merge_corpus_priority",
     "CandidateAcquisition",
     "DiscoveryAcquisitionResult",
     "DiscoveryAcquisitionService",

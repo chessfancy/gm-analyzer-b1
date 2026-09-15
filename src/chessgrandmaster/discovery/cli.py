@@ -16,7 +16,12 @@ from ..b2.cli_acquire import (
 from ..b2.registry import Registry
 from ..b2.storage import LocalObjectStore
 from .acquire import DiscoveryAcquisitionResult, DiscoveryAcquisitionService
-from .chess_results import ChessResultsDiscovery, DiscoveryResult, PROVIDER
+from .chess_results import (
+    ChessResultsDiscovery,
+    CorpusDiscoveryResult,
+    DiscoveryResult,
+    PROVIDER,
+)
 
 
 class _JsonArgumentParser(argparse.ArgumentParser):
@@ -62,6 +67,25 @@ def _add_date_options(
 ) -> None:
     parser.add_argument("--from", dest="from_date", required=required)
     parser.add_argument("--to", dest="to_date", required=required)
+
+
+def _add_corpus_options(
+    parser: argparse.ArgumentParser,
+    *,
+    allow_country: bool,
+) -> None:
+    parser.add_argument("--year", type=int, default=2026)
+    parser.add_argument("--max-lines", type=_positive_int, default=2000)
+    parser.add_argument("--limit", type=_positive_int)
+    if allow_country:
+        parser.add_argument("--country")
+    parser.add_argument("--report")
+    _add_http_options_without_limit(parser)
+    _add_acquisition_options(parser)
+
+
+def _add_http_options_without_limit(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--timeout", type=float, default=30.0)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -115,6 +139,18 @@ def _build_parser() -> argparse.ArgumentParser:
     family.add_argument("seed")
     _add_http_options(family)
     _add_acquisition_options(family)
+
+    corpus = modes.add_parser(
+        "corpus",
+        help="scan the full-year standard/classical downloadable corpus",
+    )
+    _add_corpus_options(corpus, allow_country=False)
+
+    downloadable = modes.add_parser(
+        "downloadable",
+        help="diagnostic downloadable Tournament Database scan",
+    )
+    _add_corpus_options(downloadable, allow_country=True)
     return parser
 
 
@@ -138,7 +174,7 @@ def _error_payload(
 def _success_payload(
     provider: str,
     mode: str,
-    result: DiscoveryResult,
+    result: DiscoveryResult | CorpusDiscoveryResult,
     acquisition: DiscoveryAcquisitionResult | None = None,
 ) -> dict[str, object]:
     candidates = [candidate.to_dict() for candidate in result.candidates]
@@ -150,10 +186,112 @@ def _success_payload(
         "candidates": candidates,
         "errors": list(result.errors),
     }
+    if isinstance(result, CorpusDiscoveryResult):
+        payload["windows"] = [window.to_dict() for window in result.windows]
+        payload["priority_counts"] = {
+            "book_high": result.priority_counts["BOOK_HIGH"],
+            "book_medium": result.priority_counts["BOOK_MEDIUM"],
+            "general": result.priority_counts["GENERAL"],
+        }
     if acquisition is not None:
         payload["ok"] = acquisition.failed == 0
         payload["acquisition"] = acquisition.to_dict()
     return payload
+
+
+def _corpus_report(
+    result: CorpusDiscoveryResult,
+    *,
+    year: int,
+    max_lines: int,
+    country: str | None,
+    acquisition: DiscoveryAcquisitionResult | None,
+) -> dict[str, object]:
+    action_by_identity = {}
+    if acquisition is not None:
+        action_by_identity = {
+            (item.provider, item.external_id): item.to_dict()
+            for item in acquisition.results
+        }
+    candidate_rows = []
+    for candidate in result.candidates:
+        row = candidate.to_dict()
+        outcome = action_by_identity.get((candidate.provider, candidate.external_id), {})
+        row.update(
+            {
+                "end_date": candidate.to_date,
+                "time_control": candidate.time_control_hint,
+                "acquisition_action": outcome.get("action"),
+                "tournament_id": outcome.get("tournament_id"),
+                "revision_id": outcome.get("revision_id"),
+                "raw_sha256": outcome.get("raw_sha256"),
+            }
+        )
+        candidate_rows.append(row)
+    if acquisition is None:
+        acquisition_payload = {
+            "acquired": 0,
+            "skipped_existing": 0,
+            "skipped_no_pgn": 0,
+            "failed": 0,
+        }
+    else:
+        acquisition_payload = {
+            "acquired": acquisition.acquired,
+            "skipped_existing": acquisition.skipped_existing,
+            "skipped_no_pgn": acquisition.skipped_no_pgn,
+            "failed": acquisition.failed,
+        }
+    return {
+        "year": year,
+        "time_control": "standard/classical",
+        "only_finished": True,
+        "games_available": True,
+        "max_lines": max_lines,
+        "country": country,
+        "windows": [window.to_dict() for window in result.windows],
+        "saturated_windows": [
+            window.to_dict() for window in result.saturated_windows
+        ],
+        "candidate_count": len(result.candidates),
+        "priority_counts": {
+            "book_high": result.priority_counts["BOOK_HIGH"],
+            "book_medium": result.priority_counts["BOOK_MEDIUM"],
+            "general": result.priority_counts["GENERAL"],
+        },
+        "acquisition": acquisition_payload,
+        "errors": list(result.errors),
+        "candidates": candidate_rows,
+    }
+
+
+def _write_corpus_report(
+    path: str,
+    result: CorpusDiscoveryResult,
+    *,
+    year: int,
+    max_lines: int,
+    country: str | None,
+    acquisition: DiscoveryAcquisitionResult | None,
+) -> None:
+    report_path = Path(path).expanduser()
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(
+        json.dumps(
+            _corpus_report(
+                result,
+                year=year,
+                max_lines=max_lines,
+                country=country,
+                acquisition=acquisition,
+            ),
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def _build_acquisition_service(
@@ -220,7 +358,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         service = ChessResultsDiscovery(timeout_sec=args.timeout)
         if args.provider != PROVIDER:
             raise ValueError(f"unsupported provider: {args.provider}")
-        if args.mode == "federation":
+        if args.mode in {"corpus", "downloadable"}:
+            scanned = service.discover_corpus(
+                year=args.year,
+                max_lines=args.max_lines,
+                limit=None,
+                country=getattr(args, "country", None),
+            )
+            if args.mode == "corpus":
+                result = service.enrich_corpus_priority(
+                    scanned,
+                    year=args.year,
+                    limit=args.limit,
+                )
+            else:
+                candidates = scanned.candidates
+                if args.limit is not None:
+                    candidates = candidates[: args.limit]
+                result = CorpusDiscoveryResult(
+                    candidates=tuple(candidates),
+                    windows=scanned.windows,
+                    errors=scanned.errors,
+                )
+        elif args.mode == "federation":
             result = service.discover_federation(args.federation, limit=args.limit)
         elif args.mode == "overseas-vie":
             result = service.discover_overseas_vie(
@@ -250,6 +410,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     if not args.acquire:
+        if getattr(args, "report", None):
+            try:
+                if not isinstance(result, CorpusDiscoveryResult):
+                    raise ValueError("--report is only valid for corpus modes")
+                _write_corpus_report(
+                    args.report,
+                    result,
+                    year=args.year,
+                    max_lines=args.max_lines,
+                    country=getattr(args, "country", None),
+                    acquisition=None,
+                )
+            except Exception as exc:
+                _emit(_error_payload(args.provider, args.mode, exc))
+                return 2
         _emit(_success_payload(args.provider, args.mode, result))
         return 0
 
@@ -262,6 +437,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     except Exception as exc:
         _emit(_error_payload(args.provider, args.mode, exc))
         return 2
+
+    if getattr(args, "report", None):
+        try:
+            if not isinstance(result, CorpusDiscoveryResult):
+                raise ValueError("--report is only valid for corpus modes")
+            _write_corpus_report(
+                args.report,
+                result,
+                year=args.year,
+                max_lines=args.max_lines,
+                country=getattr(args, "country", None),
+                acquisition=acquisition,
+            )
+        except Exception as exc:
+            _emit(_error_payload(args.provider, args.mode, exc))
+            return 2
 
     _emit(_success_payload(args.provider, args.mode, result, acquisition))
     return 1 if acquisition.failed else 0

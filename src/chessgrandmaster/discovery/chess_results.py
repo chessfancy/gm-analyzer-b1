@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from html.parser import HTMLParser
 from http.cookiejar import CookieJar
+import calendar
 import re
 import socket
 from typing import Any
@@ -50,12 +51,36 @@ class ChessResultsCandidate:
     title: str | None
     time_control_hint: str | None
     evidence: tuple[str, ...]
+    event_country: str | None = None
+    from_date: str | None = None
+    to_date: str | None = None
+    database_key: str | None = None
+    provider_game_count: int | None = None
     player_name: str | None = None
     fide_id: int | None = None
     source_fed: str | None = None
     confirmed_vie: bool = False
     vietnamese_name_hint: str = "none"
     player_evidence: tuple[PlayerEvidence, ...] = ()
+
+    @property
+    def priority_tier(self) -> str:
+        if self.confirmed_vie or self.vietnamese_name_hint == "strong":
+            return "BOOK_HIGH"
+        if self.event_country == "VIE":
+            return "BOOK_MEDIUM"
+        return "GENERAL"
+
+    @property
+    def priority_evidence(self) -> tuple[str, ...]:
+        reasons: list[str] = []
+        if self.confirmed_vie:
+            reasons.append("confirmed_vie_player")
+        if self.vietnamese_name_hint == "strong":
+            reasons.append("strong_vietnamese_name")
+        if self.event_country == "VIE":
+            reasons.append("event_country:VIE")
+        return tuple(reasons)
 
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-compatible representation."""
@@ -65,6 +90,13 @@ class ChessResultsCandidate:
             "source_url": self.source_url,
             "title": self.title,
             "time_control_hint": self.time_control_hint,
+            "event_country": self.event_country,
+            "from_date": self.from_date,
+            "to_date": self.to_date,
+            "database_key": self.database_key,
+            "provider_game_count": self.provider_game_count,
+            "priority_tier": self.priority_tier,
+            "priority_evidence": list(self.priority_evidence),
             "evidence": list(self.evidence),
             "player_name": self.player_name,
             "fide_id": self.fide_id,
@@ -91,6 +123,60 @@ class DiscoveryResult:
 
 
 @dataclass(frozen=True)
+class CorpusWindow:
+    """One requested or recursively split Tournament Database interval."""
+
+    from_date: str
+    to_date: str
+    returned_row_count: int
+    split: bool = False
+    saturated: bool = False
+
+    @property
+    def source_window_saturated(self) -> bool:
+        return self.saturated
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "from_date": self.from_date,
+            "to_date": self.to_date,
+            "returned_row_count": self.returned_row_count,
+            "split": self.split,
+            "saturated": self.saturated,
+            "source_window_saturated": self.source_window_saturated,
+        }
+
+
+@dataclass(frozen=True)
+class CorpusDiscoveryResult:
+    """Read-only full-year corpus scan result and window audit trail."""
+
+    candidates: tuple[ChessResultsCandidate, ...]
+    windows: tuple[CorpusWindow, ...]
+    errors: tuple[str, ...] = ()
+
+    @property
+    def saturated_windows(self) -> tuple[CorpusWindow, ...]:
+        return tuple(window for window in self.windows if window.saturated)
+
+    @property
+    def priority_counts(self) -> dict[str, int]:
+        counts = {"BOOK_HIGH": 0, "BOOK_MEDIUM": 0, "GENERAL": 0}
+        for candidate in self.candidates:
+            counts[candidate.priority_tier] += 1
+        return counts
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "candidates": [candidate.to_dict() for candidate in self.candidates],
+            "windows": [window.to_dict() for window in self.windows],
+            "errors": list(self.errors),
+            "candidate_count": len(self.candidates),
+            "priority_counts": self.priority_counts,
+        }
+
+
+@dataclass(frozen=True)
 class _Link:
     href: str
     text: str
@@ -111,6 +197,7 @@ class _FormControl:
     input_type: str
     attributes: tuple[tuple[str, str], ...]
     label: str = ""
+    options: tuple[tuple[str, str], ...] = ()
     successful: bool = True
 
     @property
@@ -125,6 +212,7 @@ class _FormControl:
                 attrs.get("title", ""),
                 attrs.get("aria-label", ""),
                 attrs.get("placeholder", ""),
+                " ".join(text for _, text in self.options),
                 self.value if self.kind == "submit" else "",
             )
         ).casefold()
@@ -300,6 +388,11 @@ class _DiscoveryParser(HTMLParser):
                         input_type="select",
                         attributes=select.attributes,
                         label=self._control_label(select.attributes),
+                        options=tuple(
+                            (option.value, self._text(option.parts))
+                            for option in select.options
+                            if option.value
+                        ),
                         successful="disabled" not in attrs,
                     )
                 )
@@ -319,6 +412,7 @@ class _DiscoveryParser(HTMLParser):
                 input_type=control.input_type,
                 attributes=control.attributes,
                 label=control.label or self._control_label(control.attributes),
+                options=control.options,
                 successful=control.successful,
             )
             for control in self._form.controls
@@ -492,6 +586,10 @@ def _control_words(control: _FormControl) -> set[str]:
     return set(re.findall(r"[a-z0-9]+", control.semantic_text))
 
 
+def _compact(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", text.casefold())
+
+
 def _find_player_form(
     parser: _DiscoveryParser,
 ) -> tuple[_HtmlForm, _FormControl, _FormControl]:
@@ -499,7 +597,8 @@ def _find_player_form(
         fide_controls = [
             control
             for control in form.controls
-            if control.input_type not in {"checkbox", "radio"}
+            if control.kind == "input"
+            and control.input_type in {"text", "search"}
             and (
                 "fideid" in re.sub(r"[^a-z0-9]", "", control.semantic_text)
                 or {"fide", "id"} <= _control_words(control)
@@ -763,17 +862,29 @@ def _tnr_from_href(page_url: str, href: str) -> tuple[str, str] | None:
 
 
 def _candidate_sort_key(candidate: ChessResultsCandidate) -> tuple[object, ...]:
-    """Sort confirmed VIE, strong-name, time control, then stable identity."""
-    if candidate.confirmed_vie:
-        evidence_rank = 0
-    elif candidate.vietnamese_name_hint == "strong":
-        evidence_rank = 1
-    else:
-        evidence_rank = 2
+    """Sort priority tiers, time control, then stable identity."""
+    evidence_rank = {
+        "BOOK_HIGH": 0,
+        "BOOK_MEDIUM": 1,
+        "GENERAL": 2,
+    }[candidate.priority_tier]
+    signal_rank = (
+        0
+        if candidate.confirmed_vie
+        else 1
+        if candidate.vietnamese_name_hint == "strong"
+        else 2
+    )
     time_rank = {"standard": 0, "rapid": 1, "blitz": 2}.get(
         candidate.time_control_hint, 3
     )
-    return (evidence_rank, time_rank, candidate.external_id, candidate.title or "")
+    return (
+        evidence_rank,
+        signal_rank,
+        time_rank,
+        candidate.external_id,
+        candidate.title or "",
+    )
 
 
 def _ordered_unique(
@@ -818,6 +929,26 @@ def _ordered_unique(
                 default=None,
             ),
             time_control_hint=previous.time_control_hint or candidate.time_control_hint,
+            event_country=previous.event_country or candidate.event_country,
+            from_date=previous.from_date or candidate.from_date,
+            to_date=previous.to_date or candidate.to_date,
+            database_key=previous.database_key or candidate.database_key,
+            provider_game_count=max(
+                value
+                for value in (
+                    previous.provider_game_count,
+                    candidate.provider_game_count,
+                )
+                if value is not None
+            )
+            if any(
+                value is not None
+                for value in (
+                    previous.provider_game_count,
+                    candidate.provider_game_count,
+                )
+            )
+            else None,
             evidence=tuple(sorted(set(previous.evidence) | set(candidate.evidence))),
             player_name=(
                 primary_player.player_name
@@ -844,6 +975,457 @@ def _ordered_unique(
         )
     ordered = sorted(merged.values(), key=_candidate_sort_key)
     return tuple(ordered if limit is None else ordered[:limit])
+
+
+def merge_corpus_priority(
+    corpus_candidates: list[ChessResultsCandidate] | tuple[ChessResultsCandidate, ...],
+    priority_results: list[DiscoveryResult] | tuple[DiscoveryResult, ...],
+    *,
+    limit: int | None = None,
+) -> tuple[ChessResultsCandidate, ...]:
+    """Merge priority evidence by exact provider identity, never by title."""
+    corpus = _ordered_unique(list(corpus_candidates))
+    corpus_keys = {(item.provider, item.external_id) for item in corpus}
+    enrichment: list[ChessResultsCandidate] = []
+    for result in priority_results:
+        for candidate in result.candidates:
+            if (candidate.provider, candidate.external_id) in corpus_keys:
+                enrichment.append(candidate)
+    return _ordered_unique([*corpus, *enrichment], limit=limit)
+
+
+def _corpus_control_words(control: _FormControl) -> set[str]:
+    return _control_words(control)
+
+
+def _corpus_option_value(
+    control: _FormControl,
+    predicate: Any,
+) -> str | None:
+    for value, text in control.options:
+        if predicate(text.casefold()):
+            return value
+    return None
+
+
+def _corpus_control(
+    form: _HtmlForm,
+    predicate: Any,
+    description: str,
+) -> _FormControl:
+    candidates = [control for control in form.controls if predicate(control)]
+    if len(candidates) != 1:
+        raise RuntimeError(
+            f"Chess-Results Tournament Database exposes no unique {description} control"
+        )
+    return candidates[0]
+
+
+def _corpus_form(
+    parser: _DiscoveryParser,
+    *,
+    max_lines: int,
+    country: str | None,
+) -> tuple[_HtmlForm, dict[str, _FormControl], dict[str, str]]:
+    """Find Tournament Database controls from labels, IDs, and option text."""
+    for form in parser.forms:
+        try:
+            from_control = _corpus_control(
+                form,
+                lambda control: control.input_type in {"date", "text"}
+                and (
+                    "from" in _corpus_control_words(control)
+                    or "start" in _corpus_control_words(control)
+                    or "von" in _compact(control.semantic_text)
+                ),
+                "tournament-end-from",
+            )
+            to_control = _corpus_control(
+                form,
+                lambda control: control.input_type in {"date", "text"}
+                and (
+                    "to" in _corpus_control_words(control)
+                    or "bis" in _compact(control.semantic_text)
+                ),
+                "tournament-end-to",
+            )
+            time_control = _corpus_control(
+                form,
+                lambda control: control.kind == "select"
+                and (
+                    {
+                        "time",
+                        "control",
+                    }
+                    <= _corpus_control_words(control)
+                    or "bedenkzeit" in _compact(control.semantic_text)
+                    or _corpus_option_value(
+                        control,
+                        lambda text: "standard" in text or "classical" in text,
+                    )
+                    is not None
+                ),
+                "time-control",
+            )
+            finished = _corpus_control(
+                form,
+                lambda control: control.input_type == "checkbox"
+                and (
+                    "finished" in _corpus_control_words(control)
+                    or "complete" in _corpus_control_words(control)
+                    or "zuende" in _compact(control.semantic_text)
+                ),
+                "only-finished",
+            )
+            games_available = _corpus_control(
+                form,
+                lambda control: control.input_type == "checkbox"
+                and (
+                    "games" in _corpus_control_words(control)
+                    or "available" in _corpus_control_words(control)
+                    or "partien" in _compact(control.semantic_text)
+                ),
+                "games-available",
+            )
+            max_control = _corpus_control(
+                form,
+                lambda control: control.kind == "select"
+                and (
+                    "maximum" in _corpus_control_words(control)
+                    or "lines" in _corpus_control_words(control)
+                    or "rows" in _corpus_control_words(control)
+                    or "anzahl" in _compact(control.semantic_text)
+                    or _corpus_option_value(
+                        control,
+                        lambda text: text.strip() == str(max_lines),
+                    )
+                    is not None
+                ),
+                "maximum-lines",
+            )
+            sort_control = _corpus_control(
+                form,
+                lambda control: control.kind == "select"
+                and (
+                    "sort" in _corpus_control_words(control)
+                    or _corpus_option_value(
+                        control,
+                        lambda text: "last update" in text,
+                    )
+                    is not None
+                ),
+                "sort",
+            )
+            country_control = _corpus_control(
+                form,
+                lambda control: control.kind == "select"
+                and (
+                    "country" in _corpus_control_words(control)
+                    or "federation" in _corpus_control_words(control)
+                    or "land" in _compact(control.semantic_text)
+                    or _corpus_option_value(
+                        control,
+                        lambda text: "all countries" in text,
+                    )
+                ),
+                "country",
+            )
+            submit = _corpus_control(
+                form,
+                lambda control: control.kind == "submit"
+                and not (
+                    {"download", "excel", "export"}
+                    & _corpus_control_words(control)
+                )
+                and (
+                    {"search", "suchen", "find", "query"}
+                    & _corpus_control_words(control)
+                ),
+                "search-submit",
+            )
+            database_key = _corpus_control(
+                form,
+                lambda control: control.input_type in {"text", "search"}
+                and (
+                    "database" in _corpus_control_words(control)
+                    or "dbkey" in _compact(control.semantic_text)
+                    or "tnr" in _compact(control.semantic_text)
+                ),
+                "database-key",
+            )
+            fide_event_id = _corpus_control(
+                form,
+                lambda control: control.input_type in {"text", "search"}
+                and (
+                    "eventid" in _compact(control.semantic_text)
+                    or (
+                        "event" in _corpus_control_words(control)
+                        and "fide" in _corpus_control_words(control)
+                    )
+                ),
+                "fide-event-id",
+            )
+            tournament = _corpus_control(
+                form,
+                lambda control: control.input_type in {"text", "search"}
+                and (
+                    (
+                        "tournament" in _corpus_control_words(control)
+                        and not (
+                            {"director", "organizer", "organiser"}
+                            & _corpus_control_words(control)
+                        )
+                    )
+                    or "turnier" in _corpus_control_words(control)
+                    or "bez" in _compact(control.semantic_text)
+                ),
+                "tournament",
+            )
+        except RuntimeError:
+            continue
+
+        standard_value = _corpus_option_value(
+            time_control,
+            lambda text: "standard" in text or "classical" in text,
+        )
+        max_value = _corpus_option_value(
+            max_control,
+            lambda text: text.strip() == str(max_lines),
+        )
+        sort_value = _corpus_option_value(
+            sort_control,
+            lambda text: "last update" in text,
+        )
+        if standard_value is None or max_value is None or sort_value is None:
+            continue
+        if country is None:
+            country_value = _corpus_option_value(
+                country_control,
+                lambda text: "all countries" in text
+                or text.strip() in {"-", "all"},
+            )
+        else:
+            country_upper = country.upper()
+            country_value = _corpus_option_value(
+                country_control,
+                lambda text: text.strip().upper() == country_upper,
+            )
+            if country_value is None:
+                country_value = next(
+                    (
+                        value
+                        for value, text in country_control.options
+                        if value.upper() == country_upper
+                    ),
+                    None,
+                )
+        if country_value is None:
+            continue
+        return (
+            form,
+            {
+                "from": from_control,
+                "to": to_control,
+                "time_control": time_control,
+                "finished": finished,
+                "games_available": games_available,
+                "max_lines": max_control,
+                "sort": sort_control,
+                "country": country_control,
+                "submit": submit,
+                "database_key": database_key,
+                "fide_event_id": fide_event_id,
+                "tournament": tournament,
+            },
+            {
+                "time_control": standard_value,
+                "finished": finished.value or "on",
+                "games_available": games_available.value or "on",
+                "max_lines": max_value,
+                "sort": sort_value,
+                "country": country_value,
+            },
+        )
+    raise RuntimeError(
+        "Chess-Results Tournament Database exposes no usable semantic search form"
+    )
+
+
+def _provider_date(value: str) -> str | None:
+    normalized = value.strip()
+    for pattern, order in (
+        (r"(\d{4})[-/.]?(\d{2})[-/.]?(\d{2})", "ymd"),
+        (r"(\d{2})[./-](\d{2})[./-](\d{4})", "dmy"),
+    ):
+        match = re.fullmatch(rf"\s*{pattern}\s*", normalized)
+        if match is None:
+            continue
+        parts = [int(match.group(index)) for index in range(1, 4)]
+        if order == "dmy":
+            parts = [parts[2], parts[1], parts[0]]
+        try:
+            return date(*parts).isoformat()
+        except ValueError:
+            return None
+    return None
+
+
+def _corpus_header_indices(row: _TableRow) -> dict[str, int]:
+    indices: dict[str, int] = {}
+    for index, cell in enumerate(row.cells):
+        compact = _compact(cell)
+        if compact in {"tournament", "turnier"} or "tournamentname" in compact:
+            indices.setdefault("title", index)
+        elif compact in {"fed", "federation", "country"}:
+            indices.setdefault("event_country", index)
+        elif compact in {
+            "from",
+            "start",
+            "startdate",
+            "von",
+            "begin",
+            "beginn",
+        }:
+            indices.setdefault("from_date", index)
+        elif compact in {"to", "end", "enddate", "bis", "ende"}:
+            indices.setdefault("to_date", index)
+        elif "timecontrol" in compact or compact in {"bedenkzeit", "tempo"}:
+            indices.setdefault("time_control", index)
+        elif compact in {"n", "games", "gamecount", "partien"}:
+            indices.setdefault("game_count", index)
+        elif compact in {
+            "dbkey",
+            "databasekey",
+            "tournamentkey",
+            "tnr",
+            "tnrnr",
+            "turniernr",
+            "turniernummer",
+        }:
+            indices.setdefault("database_key", index)
+        elif compact in {"eventid", "fideeventid"}:
+            indices.setdefault("event_id", index)
+    return indices
+
+
+def _corpus_time_control(value: str) -> str | None:
+    lowered = value.casefold()
+    if re.search(r"\b(?:rapid|blitz|bullet|lightning)\b", lowered):
+        return None
+    return "standard"
+
+
+def _corpus_candidates(
+    page_url: str,
+    parser: _DiscoveryParser,
+    *,
+    year: int,
+    window_from: str,
+    window_to: str,
+) -> list[ChessResultsCandidate]:
+    header_index = next(
+        (
+            index
+            for index, row in enumerate(parser.rows)
+            if {
+                "title",
+                "event_country",
+                "from_date",
+                "to_date",
+                "database_key",
+            }
+            <= _corpus_header_indices(row).keys()
+        ),
+        None,
+    )
+    if header_index is None:
+        return []
+    indices = _corpus_header_indices(parser.rows[header_index])
+    candidates: list[ChessResultsCandidate] = []
+    for row in parser.rows[header_index + 1 :]:
+        required_indices = [
+            indices["title"],
+            indices["event_country"],
+            indices["from_date"],
+            indices["to_date"],
+            indices["database_key"],
+        ]
+        if len(row.cells) <= max(required_indices):
+            continue
+        key = row.cells[indices["database_key"]].strip()
+        if not key.isdigit():
+            continue
+        from_value = _provider_date(row.cells[indices["from_date"]])
+        to_value = _provider_date(row.cells[indices["to_date"]])
+        if from_value is None or to_value is None or not to_value.startswith(f"{year:04d}-"):
+            continue
+        if "game_count" in indices and len(row.cells) > indices["game_count"]:
+            raw_count = re.sub(r"[^0-9]", "", row.cells[indices["game_count"]])
+            game_count = int(raw_count) if raw_count else None
+            if game_count == 0:
+                continue
+        else:
+            game_count = None
+        raw_time_control = (
+            row.cells[indices["time_control"]]
+            if "time_control" in indices and len(row.cells) > indices["time_control"]
+            else ""
+        )
+        time_control = _corpus_time_control(raw_time_control)
+        if time_control is None:
+            continue
+        event_country = row.cells[indices["event_country"]].strip().upper() or None
+        title = row.cells[indices["title"]].strip() or None
+        source_url = urljoin(page_url, f"/tnr{key}.aspx")
+        for link in row.links:
+            parsed = _tnr_from_href(page_url, link.href)
+            if parsed is not None and parsed[0].casefold() == f"tnr{key}".casefold():
+                source_url = parsed[1]
+                if link.text:
+                    title = link.text
+                break
+        candidates.append(
+            ChessResultsCandidate(
+                provider=PROVIDER,
+                external_id=f"tnr{key}",
+                source_url=source_url,
+                title=title,
+                time_control_hint=time_control,
+                evidence=(
+                    f"corpus:year:{year}",
+                    f"source_window:{window_from}:{window_to}",
+                    "filter:standard",
+                    "filter:finished",
+                    "filter:games_available",
+                ),
+                event_country=event_country,
+                from_date=from_value,
+                to_date=to_value,
+                database_key=key,
+                provider_game_count=game_count,
+            )
+        )
+    return candidates
+
+
+def _calendar_windows(year: int) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (
+            date(year, month, 1).isoformat(),
+            date(year, month, calendar.monthrange(year, month)[1]).isoformat(),
+        )
+        for month in range(1, 13)
+    )
+
+
+def _split_date_window(from_date: str, to_date: str) -> tuple[tuple[str, str], tuple[str, str]]:
+    start = date.fromisoformat(from_date)
+    end = date.fromisoformat(to_date)
+    midpoint = start + timedelta(days=(end - start).days // 2)
+    return (start.isoformat(), midpoint.isoformat()), (
+        (midpoint + timedelta(days=1)).isoformat(),
+        end.isoformat(),
+    )
 
 
 def _family_relation_allowed(link: _Link) -> bool:
@@ -968,6 +1550,216 @@ class ChessResultsDiscovery:
                     )
                 )
         return DiscoveryResult(_ordered_unique(candidates, limit=limit))
+
+    def _corpus_search_url(self) -> str:
+        return f"{self.base_url}/TurnierSuche.aspx?lan=1"
+
+    def _query_corpus_window(
+        self,
+        *,
+        year: int,
+        from_date: str,
+        to_date: str,
+        max_lines: int,
+        country: str | None,
+    ) -> tuple[list[ChessResultsCandidate], int]:
+        entry_page_url, entry_body = self._fetch(self._corpus_search_url())
+        entry = _parse_discovery_page(entry_body)
+        form, controls, values = _corpus_form(
+            entry,
+            max_lines=max_lines,
+            country=country,
+        )
+        overrides = {
+            controls["from"].name: from_date,
+            controls["to"].name: to_date,
+            controls["time_control"].name: values["time_control"],
+            controls["finished"].name: values["finished"],
+            controls["games_available"].name: values["games_available"],
+            controls["max_lines"].name: values["max_lines"],
+            controls["sort"].name: values["sort"],
+            controls["country"].name: values["country"],
+        }
+        result_url, method, data = _form_request(
+            form,
+            entry_page_url,
+            controls["submit"],
+            overrides,
+        )
+        result_page_url, result_body = self._fetch(
+            result_url,
+            method=method,
+            data=data,
+        )
+        candidates = _corpus_candidates(
+            result_page_url,
+            _parse_discovery_page(result_body),
+            year=year,
+            window_from=from_date,
+            window_to=to_date,
+        )
+        return candidates, len(candidates)
+
+    def _scan_corpus_window(
+        self,
+        *,
+        year: int,
+        from_date: str,
+        to_date: str,
+        max_lines: int,
+        country: str | None,
+    ) -> tuple[list[ChessResultsCandidate], list[CorpusWindow]]:
+        candidates, returned_count = self._query_corpus_window(
+            year=year,
+            from_date=from_date,
+            to_date=to_date,
+            max_lines=max_lines,
+            country=country,
+        )
+        if returned_count < max_lines:
+            return candidates, [
+                CorpusWindow(from_date, to_date, returned_count)
+            ]
+        if from_date == to_date:
+            return candidates, [
+                CorpusWindow(
+                    from_date,
+                    to_date,
+                    returned_count,
+                    saturated=True,
+                )
+            ]
+        left, right = _split_date_window(from_date, to_date)
+        left_candidates, left_windows = self._scan_corpus_window(
+            year=year,
+            from_date=left[0],
+            to_date=left[1],
+            max_lines=max_lines,
+            country=country,
+        )
+        right_candidates, right_windows = self._scan_corpus_window(
+            year=year,
+            from_date=right[0],
+            to_date=right[1],
+            max_lines=max_lines,
+            country=country,
+        )
+        return (
+            [*left_candidates, *right_candidates],
+            [
+                CorpusWindow(
+                    from_date,
+                    to_date,
+                    returned_count,
+                    split=True,
+                ),
+                *left_windows,
+                *right_windows,
+            ],
+        )
+
+    def discover_corpus(
+        self,
+        *,
+        year: int,
+        max_lines: int = 2000,
+        limit: int | None = None,
+        country: str | None = None,
+    ) -> CorpusDiscoveryResult:
+        """Scan the complete year through Tournament Database windows."""
+        if isinstance(year, bool) or not isinstance(year, int):
+            raise ValueError("year must be an integer")
+        if year < 1 or year > 9999:
+            raise ValueError("year must be between 1 and 9999")
+        if max_lines <= 0:
+            raise ValueError("max_lines must be positive")
+        if limit is not None and limit <= 0:
+            raise ValueError("limit must be positive")
+        if country is not None:
+            country = country.strip().upper()
+            if not re.fullmatch(r"[A-Z]{3}", country):
+                raise ValueError("country must be a three-letter FIDE abbreviation")
+
+        all_candidates: list[ChessResultsCandidate] = []
+        windows: list[CorpusWindow] = []
+        errors: list[str] = []
+        for from_date, to_date in _calendar_windows(year):
+            try:
+                candidates, scanned_windows = self._scan_corpus_window(
+                    year=year,
+                    from_date=from_date,
+                    to_date=to_date,
+                    max_lines=max_lines,
+                    country=country,
+                )
+            except Exception as exc:
+                errors.append(
+                    f"source_window:{from_date}:{to_date}:{type(exc).__name__}:{exc}"
+                )
+                continue
+            all_candidates.extend(candidates)
+            windows.extend(scanned_windows)
+        return CorpusDiscoveryResult(
+            candidates=_ordered_unique(all_candidates, limit=limit),
+            windows=tuple(windows),
+            errors=tuple(errors),
+        )
+
+    def enrich_corpus_priority(
+        self,
+        result: CorpusDiscoveryResult,
+        *,
+        year: int,
+        limit: int | None = None,
+        priority_results: tuple[DiscoveryResult, ...] | None = None,
+    ) -> CorpusDiscoveryResult:
+        """Add existing player-discovery evidence after the full scan."""
+        if priority_results is None:
+            from_date = f"{year:04d}-01-01"
+            to_date = f"{year:04d}-12-31"
+            discovered: list[DiscoveryResult] = []
+            errors = list(result.errors)
+            for lane, discover in (
+                (
+                    "overseas-vie",
+                    lambda: self.discover_overseas_vie(
+                        from_date=from_date,
+                        to_date=to_date,
+                    ),
+                ),
+                (
+                    "diaspora",
+                    lambda: self.discover_diaspora(
+                        from_date=from_date,
+                        to_date=to_date,
+                    ),
+                ),
+            ):
+                try:
+                    lane_result = discover()
+                except Exception as exc:
+                    errors.append(
+                        f"priority:{lane}:{type(exc).__name__}:{exc}"
+                    )
+                    continue
+                discovered.append(lane_result)
+                errors.extend(f"priority:{lane}:{error}" for error in lane_result.errors)
+            priority_results = tuple(discovered)
+        else:
+            errors = list(result.errors)
+            for index, lane_result in enumerate(priority_results):
+                errors.extend(
+                    f"priority:{index}:{error}" for error in lane_result.errors
+                )
+        return CorpusDiscoveryResult(
+            candidates=merge_corpus_priority(
+                result.candidates,
+                priority_results,
+                limit=limit,
+            ),
+            windows=result.windows,
+            errors=tuple(errors),
+        )
 
     def _player_search_url(self) -> str:
         return f"{self.base_url}{_PLAYER_SEARCH_PATH}?lan=1"
@@ -1211,7 +2003,10 @@ class ChessResultsDiscovery:
 __all__ = [
     "ChessResultsCandidate",
     "ChessResultsDiscovery",
+    "CorpusDiscoveryResult",
+    "CorpusWindow",
     "DiscoveryResult",
     "PlayerEvidence",
     "PROVIDER",
+    "merge_corpus_priority",
 ]
