@@ -9,6 +9,12 @@ from .name_filter import (
     normalize_player_name,
     vietnamese_name_hint,
 )
+from .chess_results import (
+    ChessResultsCandidate,
+    ChessResultsDiscovery,
+    DiscoveryResult,
+    PlayerEvidence,
+)
 
 __all__ = [
     "AMBIGUOUS_TOKENS",
@@ -18,4 +24,8 @@ __all__ = [
     "is_confirmed_vie_fide_id",
     "normalize_player_name",
     "vietnamese_name_hint",
+    "ChessResultsCandidate",
+    "ChessResultsDiscovery",
+    "DiscoveryResult",
+    "PlayerEvidence",
 ]

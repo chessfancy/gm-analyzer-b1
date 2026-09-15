@@ -1,0 +1,165 @@
+"""Command-line entry point for read-only candidate discovery."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from typing import Sequence
+
+from .chess_results import ChessResultsDiscovery, DiscoveryResult, PROVIDER
+
+
+class _JsonArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        raise ValueError(message)
+
+
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a positive integer") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
+def _add_http_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--timeout", type=float, default=30.0)
+    parser.add_argument("--limit", type=_positive_int)
+
+
+def _add_date_options(
+    parser: argparse.ArgumentParser, *, required: bool = True
+) -> None:
+    parser.add_argument("--from", dest="from_date", required=required)
+    parser.add_argument("--to", dest="to_date", required=required)
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = _JsonArgumentParser(
+        prog="cgm-discover",
+        description="Read-only Chess-Results candidate discovery",
+    )
+    providers = parser.add_subparsers(
+        dest="provider", required=True, parser_class=_JsonArgumentParser
+    )
+    chess_results = providers.add_parser(
+        PROVIDER,
+        help="discover candidates from Chess-Results",
+    )
+    modes = chess_results.add_subparsers(
+        dest="mode", required=True, parser_class=_JsonArgumentParser
+    )
+
+    federation = modes.add_parser(
+        "federation", help="list tournaments from a federation feed"
+    )
+    federation.add_argument("federation")
+    _add_http_options(federation)
+
+    overseas = modes.add_parser(
+        "overseas-vie", help="search VIE players in overseas tournaments"
+    )
+    _add_date_options(overseas)
+    _add_http_options(overseas)
+
+    diaspora = modes.add_parser(
+        "diaspora", help="search bounded surname seeds with strong name hints"
+    )
+    _add_date_options(diaspora)
+    _add_http_options(diaspora)
+
+    player = modes.add_parser(
+        "player", help="search one FIDE ID"
+    )
+    player.add_argument("fide_id")
+    _add_date_options(player, required=False)
+    _add_http_options(player)
+
+    family = modes.add_parser(
+        "family", help="follow explicit family links from one tournament"
+    )
+    family.add_argument("seed")
+    _add_http_options(family)
+    return parser
+
+
+def _emit(payload: dict[str, object]) -> None:
+    print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+
+
+def _error_payload(
+    provider: str | None,
+    mode: str | None,
+    exc: Exception,
+) -> dict[str, object]:
+    return {
+        "ok": False,
+        "provider": provider,
+        "mode": mode,
+        "error": {"type": type(exc).__name__, "message": str(exc)},
+    }
+
+
+def _success_payload(provider: str, mode: str, result: DiscoveryResult) -> dict[str, object]:
+    candidates = [candidate.to_dict() for candidate in result.candidates]
+    return {
+        "ok": True,
+        "provider": provider,
+        "mode": mode,
+        "candidate_count": len(candidates),
+        "candidates": candidates,
+        "errors": list(result.errors),
+    }
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = _build_parser()
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        return int(exc.code)
+    except Exception as exc:
+        _emit(_error_payload(None, None, exc))
+        return 2
+
+    try:
+        service = ChessResultsDiscovery(timeout_sec=args.timeout)
+        if args.provider != PROVIDER:
+            raise ValueError(f"unsupported provider: {args.provider}")
+        if args.mode == "federation":
+            result = service.discover_federation(args.federation, limit=args.limit)
+        elif args.mode == "overseas-vie":
+            result = service.discover_overseas_vie(
+                from_date=args.from_date,
+                to_date=args.to_date,
+                limit=args.limit,
+            )
+        elif args.mode == "diaspora":
+            result = service.discover_diaspora(
+                from_date=args.from_date,
+                to_date=args.to_date,
+                limit=args.limit,
+            )
+        elif args.mode == "player":
+            result = service.discover_player(
+                args.fide_id,
+                from_date=args.from_date,
+                to_date=args.to_date,
+                limit=args.limit,
+            )
+        elif args.mode == "family":
+            result = service.expand_family(args.seed, limit=args.limit)
+        else:
+            raise ValueError(f"unsupported mode: {args.mode}")
+    except Exception as exc:
+        _emit(_error_payload(args.provider, args.mode, exc))
+        return 2
+
+    _emit(_success_payload(args.provider, args.mode, result))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
