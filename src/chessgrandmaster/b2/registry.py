@@ -246,12 +246,35 @@ class Registry:
 
     def __init__(self, path: Path):
         self.path = Path(path).expanduser()
+        self._read_only = False
         if str(self.path) != ":memory:":
             self.path.parent.mkdir(parents=True, exist_ok=True)
         self.ensure_schema()
 
+    @classmethod
+    def open_read_only(cls, path: Path) -> "Registry":
+        """Open an existing registry without schema initialization or writes."""
+        registry_path = Path(path).expanduser()
+        if registry_path.is_dir():
+            raise ValueError("registry path must be a file, not a directory")
+        if str(registry_path) == ":memory:" or not registry_path.is_file():
+            raise FileNotFoundError(f"registry does not exist: {registry_path}")
+
+        registry = cls.__new__(cls)
+        registry.path = registry_path
+        registry._read_only = True
+        return registry
+
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=30)
+        if self._read_only:
+            connection = sqlite3.connect(
+                f"{self.path.resolve().as_uri()}?mode=ro",
+                timeout=30,
+                uri=True,
+            )
+            connection.execute("PRAGMA query_only = ON")
+        else:
+            connection = sqlite3.connect(self.path, timeout=30)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         return connection

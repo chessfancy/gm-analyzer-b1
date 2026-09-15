@@ -94,7 +94,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         path = _registry_for_read(args.registry)
-        registry = Registry(path)
+        registry = Registry.open_read_only(path)
         if args.tournament_id is None:
             payload = _global_payload(registry)
         else:

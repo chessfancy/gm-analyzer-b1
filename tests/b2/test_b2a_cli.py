@@ -4,6 +4,7 @@ from io import BytesIO
 import json
 from pathlib import Path
 import sys
+import sqlite3
 import tomllib
 from urllib.parse import urlencode
 from urllib.parse import urlparse
@@ -426,6 +427,14 @@ def test_registry_status_is_read_only(tmp_path, capsys, fixture_adapters):
     capsys.readouterr()
     registry = Registry(registry_path)
     before = _all_rows(registry)
+    before_bytes = registry_path.read_bytes()
+    with registry._connect() as connection:
+        before_meta = connection.execute(
+            "SELECT key, value FROM registry_meta ORDER BY key"
+        ).fetchall()
+        before_user_version = connection.execute(
+            "PRAGMA user_version"
+        ).fetchone()[0]
 
     assert cli_registry.main(["status", "--registry", str(registry_path)]) == 0
     assert (
@@ -436,7 +445,54 @@ def test_registry_status_is_read_only(tmp_path, capsys, fixture_adapters):
     )
     capsys.readouterr()
 
-    assert _all_rows(Registry(registry_path)) == before
+    assert _all_rows(registry) == before
+    assert registry_path.read_bytes() == before_bytes
+    with registry._connect() as connection:
+        assert connection.execute(
+            "SELECT key, value FROM registry_meta ORDER BY key"
+        ).fetchall() == before_meta
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == before_user_version
+
+
+def test_registry_open_read_only_requires_existing_file(tmp_path):
+    registry_path = tmp_path / "missing.sqlite"
+
+    with pytest.raises(FileNotFoundError):
+        Registry.open_read_only(registry_path)
+
+    assert not registry_path.exists()
+
+
+def test_registry_open_read_only_rejects_writes(tmp_path):
+    registry_path = tmp_path / "registry.sqlite"
+    Registry(registry_path)
+    before_bytes = registry_path.read_bytes()
+
+    read_only = Registry.open_read_only(registry_path)
+    with pytest.raises(sqlite3.OperationalError, match="readonly"):
+        read_only.upsert_source("must-not-write")
+
+    assert registry_path.read_bytes() == before_bytes
+
+
+def test_registry_status_does_not_initialize_existing_partial_file(tmp_path, capsys):
+    registry_path = tmp_path / "partial.sqlite"
+    with sqlite3.connect(registry_path) as connection:
+        connection.execute("CREATE TABLE sentinel(value TEXT NOT NULL)")
+        connection.execute("INSERT INTO sentinel(value) VALUES ('untouched')")
+    before_bytes = registry_path.read_bytes()
+
+    exit_code = cli_registry.main(["status", "--registry", str(registry_path)])
+
+    payload = _stdout_json(capsys)
+    assert exit_code != 0
+    assert payload["ok"] is False
+    assert registry_path.read_bytes() == before_bytes
+    with sqlite3.connect(registry_path) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 0
+        assert connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"
+        ).fetchall() == [("sentinel",)]
 
 
 def test_cli_commands_do_not_invoke_b1_analysis(
