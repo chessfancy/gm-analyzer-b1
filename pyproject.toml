@@ -29,6 +29,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 chessgrandmaster = ["engine.toml"]
+"chessgrandmaster.discovery" = ["data/*.txt", "data/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
