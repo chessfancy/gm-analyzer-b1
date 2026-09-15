@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -302,6 +302,75 @@ def test_diaspora_lane_keeps_only_strong_name_hints_and_preserves_source_fed():
     submitted = opener.calls[1][2].decode("utf-8")
     assert "last-name=nguyen" in submitted
     assert "foreign-only" not in submitted
+
+
+BUI_RESULT_HTML = """
+<html><body>
+  <table>
+    <tr><th>Name</th><th>FideID</th><th>FED</th><th>Tournament</th><th>End-Date</th></tr>
+    <tr>
+      <td><a href="/tnr3003.aspx?lan=1&art=9&snr=1">Bui, Dai Lam</a></td>
+      <td>900000001</td><td>CZE</td>
+      <td><a href="/tnr3003.aspx?lan=1">Lower Ranked Cup</a></td><td>2025/05/01</td>
+    </tr>
+  </table>
+</body></html>
+"""
+
+NGUYEN_RESULT_HTML = """
+<html><body>
+  <table>
+    <tr><th>Name</th><th>FideID</th><th>FED</th><th>Tournament</th><th>End-Date</th></tr>
+    <tr>
+      <td><a href="/tnr3004.aspx?lan=1&art=9&snr=1">Nguyen, Thai Dai Van</a></td>
+      <td>12401137</td><td>VIE</td>
+      <td><a href="/tnr3004.aspx?lan=1">Higher Ranked Cup</a></td><td>2025/05/02</td>
+    </tr>
+  </table>
+</body></html>
+"""
+
+
+class _DiasporaOpener:
+    def __init__(self, results: dict[str, str]) -> None:
+        self.results = results
+        self.calls: list[tuple[str, str, bytes | None]] = []
+        self.seeds: list[str] = []
+
+    def open(self, request, timeout: float):
+        self.calls.append((request.method, request.full_url, request.data))
+        if request.method == "GET":
+            body = PLAYER_FORM_HTML
+        else:
+            fields = parse_qs((request.data or b"").decode("utf-8"))
+            seed = fields["last-name"][0]
+            self.seeds.append(seed)
+            body = self.results[seed]
+        return _Response(body, request.full_url)
+
+
+def test_diaspora_limit_applies_after_all_seeds_and_keeps_later_errors():
+    opener = _DiasporaOpener(
+        {
+            "bui": BUI_RESULT_HTML,
+            "nguyen": NGUYEN_RESULT_HTML,
+            "zzz": "<html><body><p>source rejected this seed</p></body></html>",
+        }
+    )
+    service = ChessResultsDiscovery(opener=opener)
+
+    result = service.discover_diaspora(
+        from_date="2025-01-01",
+        to_date="2026-09-15",
+        limit=1,
+        surname_seeds=("bui", "nguyen", "zzz"),
+    )
+
+    assert opener.seeds == ["bui", "nguyen", "zzz"]
+    assert len(result.candidates) == 1
+    assert result.candidates[0].external_id == "tnr3004"
+    assert result.candidates[0].confirmed_vie is True
+    assert any(error.startswith("surname_seed:zzz:") for error in result.errors)
 
 
 FAMILY_HTML = """

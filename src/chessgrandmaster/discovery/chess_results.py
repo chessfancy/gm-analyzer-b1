@@ -1153,8 +1153,6 @@ class ChessResultsDiscovery:
                 )
             except (RuntimeError, ValueError) as exc:
                 errors.append(f"surname_seed:{seed}:{exc}")
-            if limit is not None and len(_ordered_unique(candidates)) >= limit:
-                break
         return DiscoveryResult(_ordered_unique(candidates, limit=limit), tuple(errors))
 
 
