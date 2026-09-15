@@ -672,6 +672,8 @@ def _player_candidates(
             vietnamese_name_hint=hint.strength,
         )
         reasons = set(evidence)
+        if fide_id is not None and is_confirmed_vie_fide_id(fide_id):
+            reasons.add("confirmed_vie:fide_id_set")
         if surname_seed is not None:
             reasons.update(
                 {

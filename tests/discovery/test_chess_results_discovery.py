@@ -196,9 +196,8 @@ def test_player_fide_search_discovers_rows_and_preserves_form_contract():
     assert result.candidates[0].confirmed_vie is True
     assert result.candidates[0].fide_id == 12401137
     assert result.candidates[0].source_fed == "VIE"
-    assert result.candidates[0].evidence == (
-        "player_database:fide_id:12401137",
-    )
+    assert "player_database:fide_id:12401137" in result.candidates[0].evidence
+    assert "confirmed_vie:fide_id_set" in result.candidates[0].evidence
     assert len(opener.calls) == 2
     assert opener.calls[0][0] == "GET"
     assert opener.calls[1][0] == "POST"
