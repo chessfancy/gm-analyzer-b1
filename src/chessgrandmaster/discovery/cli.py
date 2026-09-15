@@ -4,8 +4,18 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 from typing import Sequence
 
+from ..b2.acquisition import AcquisitionService
+from ..b2.cli_acquire import (
+    DEFAULT_REGISTRY_PATH,
+    DEFAULT_ROOT_PATH,
+    build_adapters,
+)
+from ..b2.registry import Registry
+from ..b2.storage import LocalObjectStore
+from .acquire import DiscoveryAcquisitionResult, DiscoveryAcquisitionService
 from .chess_results import ChessResultsDiscovery, DiscoveryResult, PROVIDER
 
 
@@ -27,6 +37,24 @@ def _positive_int(value: str) -> int:
 def _add_http_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--limit", type=_positive_int)
+
+
+def _add_acquisition_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--acquire",
+        action="store_true",
+        help="acquire discovered candidates through the B2a service",
+    )
+    parser.add_argument(
+        "--registry",
+        default=DEFAULT_REGISTRY_PATH,
+        help=f"registry.sqlite path (default: {DEFAULT_REGISTRY_PATH}).",
+    )
+    parser.add_argument(
+        "--root",
+        default=DEFAULT_ROOT_PATH,
+        help=f"B2 local root (default: {DEFAULT_ROOT_PATH}).",
+    )
 
 
 def _add_date_options(
@@ -57,18 +85,21 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     federation.add_argument("federation")
     _add_http_options(federation)
+    _add_acquisition_options(federation)
 
     overseas = modes.add_parser(
         "overseas-vie", help="search VIE players in overseas tournaments"
     )
     _add_date_options(overseas)
     _add_http_options(overseas)
+    _add_acquisition_options(overseas)
 
     diaspora = modes.add_parser(
         "diaspora", help="search bounded surname seeds with strong name hints"
     )
     _add_date_options(diaspora)
     _add_http_options(diaspora)
+    _add_acquisition_options(diaspora)
 
     player = modes.add_parser(
         "player", help="search one FIDE ID"
@@ -76,12 +107,14 @@ def _build_parser() -> argparse.ArgumentParser:
     player.add_argument("fide_id")
     _add_date_options(player, required=False)
     _add_http_options(player)
+    _add_acquisition_options(player)
 
     family = modes.add_parser(
         "family", help="follow explicit family links from one tournament"
     )
     family.add_argument("seed")
     _add_http_options(family)
+    _add_acquisition_options(family)
     return parser
 
 
@@ -102,9 +135,14 @@ def _error_payload(
     }
 
 
-def _success_payload(provider: str, mode: str, result: DiscoveryResult) -> dict[str, object]:
+def _success_payload(
+    provider: str,
+    mode: str,
+    result: DiscoveryResult,
+    acquisition: DiscoveryAcquisitionResult | None = None,
+) -> dict[str, object]:
     candidates = [candidate.to_dict() for candidate in result.candidates]
-    return {
+    payload: dict[str, object] = {
         "ok": True,
         "provider": provider,
         "mode": mode,
@@ -112,6 +150,34 @@ def _success_payload(provider: str, mode: str, result: DiscoveryResult) -> dict[
         "candidates": candidates,
         "errors": list(result.errors),
     }
+    if acquisition is not None:
+        payload["ok"] = acquisition.failed == 0
+        payload["acquisition"] = acquisition.to_dict()
+    return payload
+
+
+def _build_acquisition_service(
+    registry_argument: str,
+    root_argument: str,
+) -> DiscoveryAcquisitionService:
+    registry_path = Path(registry_argument).expanduser().resolve()
+    root_path = Path(root_argument).expanduser().resolve()
+    if registry_path.is_dir():
+        raise ValueError("registry path must be a file, not a directory")
+    if root_path.is_file():
+        raise ValueError("root path must be a directory, not a file")
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    root_path.mkdir(parents=True, exist_ok=True)
+
+    registry = Registry(registry_path)
+    store = LocalObjectStore(root_path / "objects")
+    acquisition = AcquisitionService(
+        registry=registry,
+        store=store,
+        workspace=root_path / "workspace",
+        adapters=build_adapters(),
+    )
+    return DiscoveryAcquisitionService(registry, acquisition)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -157,8 +223,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         _emit(_error_payload(args.provider, args.mode, exc))
         return 2
 
-    _emit(_success_payload(args.provider, args.mode, result))
-    return 0
+    if not args.acquire:
+        _emit(_success_payload(args.provider, args.mode, result))
+        return 0
+
+    try:
+        acquisition_service = _build_acquisition_service(
+            args.registry,
+            args.root,
+        )
+        acquisition = acquisition_service.acquire_candidates(result.candidates)
+    except Exception as exc:
+        _emit(_error_payload(args.provider, args.mode, exc))
+        return 2
+
+    _emit(_success_payload(args.provider, args.mode, result, acquisition))
+    return 1 if acquisition.failed else 0
 
 
 if __name__ == "__main__":

@@ -273,6 +273,37 @@ def test_describe_reads_metadata_without_requiring_a_games_link():
     assert len(opener.request_records) == 1
 
 
+def test_describe_accepts_bare_host_redirect_to_approved_shard():
+    bare_url = "https://chess-results.com/tnr1450909.aspx?lan=1"
+    shard_url = "https://s2.chess-results.com/tnr1450909.aspx?lan=1"
+    page = b"<html><h2>Shard fixture</h2><p>Metadata only</p></html>"
+    opener = FakeOpener(
+        {bare_url: lambda: FakeResponse(page, final_url=shard_url)}
+    )
+    adapter = ChessResultsAdapter(opener=opener)
+    ref = adapter.discover(bare_url)[0]
+
+    assert adapter.describe(ref).title == "Shard fixture"
+
+
+def test_describe_rejects_redirect_to_unapproved_host():
+    bare_url = "https://chess-results.com/tnr1450909.aspx?lan=1"
+    evil_url = "https://evil.example/tnr1450909.aspx?lan=1"
+    opener = FakeOpener(
+        {
+            bare_url: lambda: FakeResponse(
+                b"<html><h2>Evil fixture</h2></html>",
+                final_url=evil_url,
+            )
+        }
+    )
+    adapter = ChessResultsAdapter(opener=opener)
+    ref = adapter.discover(bare_url)[0]
+
+    with pytest.raises(RuntimeError, match="outside approved source hosts"):
+        adapter.describe(ref)
+
+
 def test_describe_extracts_same_host_direct_pgn_metadata_when_exposed():
     pgn_url = "https://s3.chess-results.com/static/games.pgn"
     page = (

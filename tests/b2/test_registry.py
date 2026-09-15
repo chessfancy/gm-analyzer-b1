@@ -686,3 +686,35 @@ def test_registry_status_read_apis_return_plain_json_primitives(tmp_path):
     ]
     assert low_summary["source_tournaments"] == []
     assert json.loads(json.dumps(summary)) == summary
+
+
+def test_find_source_tournament_looks_up_exact_provider_identity(tmp_path):
+    registry = Registry(tmp_path / "registry.sqlite")
+    source_id = registry.upsert_source(
+        "chess-results",
+        "https://chess-results.com",
+    )
+    tournament_id = registry.upsert_tournament(
+        "chess-results-tnr1450909",
+        name="Title must not be used for lookup",
+        status="DOWNLOADED",
+    )
+    source_tournament_id = registry.upsert_source_tournament(
+        source_id=source_id,
+        tournament_id=tournament_id,
+        external_id="tnr1450909",
+        source_url="https://chess-results.com/tnr1450909.aspx",
+    )
+
+    assert registry.find_source_tournament("chess-results", "tnr1450909") == {
+        "source_id": source_id,
+        "source_name": "chess-results",
+        "source_tournament_id": source_tournament_id,
+        "tournament_id": tournament_id,
+        "external_id": "tnr1450909",
+        "status": "DOWNLOADED",
+    }
+    assert registry.find_source_tournament("other-provider", "tnr1450909") is None
+    assert registry.find_source_tournament(
+        "chess-results", "Title must not be used for lookup"
+    ) is None

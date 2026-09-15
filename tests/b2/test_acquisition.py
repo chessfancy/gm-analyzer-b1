@@ -14,6 +14,8 @@ from chessgrandmaster.b2.acquisition import AcquisitionService
 from chessgrandmaster.b2.registry import Registry
 from chessgrandmaster.b2.sources.chess_results import ChessResultsAdapter
 from chessgrandmaster.b2.storage import LocalObjectStore
+from chessgrandmaster.discovery.acquire import DiscoveryAcquisitionService
+from chessgrandmaster.discovery.chess_results import ChessResultsCandidate
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -410,3 +412,48 @@ def test_result_status_reflects_actual_registry_state_without_regression(tmp_pat
     assert second.tournament_id == first.tournament_id
     assert second.revision_id == first.revision_id
     assert second.canonical_sha256 == first.canonical_sha256
+
+
+def test_discovery_acquisition_rerun_skips_completed_source_without_new_revision(
+    tmp_path,
+):
+    acquisition, registry, _store, _opener = _service(tmp_path)
+    candidate = ChessResultsCandidate(
+        provider="chess-results",
+        external_id="tnr1450909",
+        source_url=NORMALIZED_SOURCE_URL,
+        title="Fixture tournament",
+        time_control_hint="standard",
+        evidence=("fixture",),
+    )
+
+    class CountingAcquisition:
+        def __init__(self, delegate):
+            self.delegate = delegate
+            self.calls: list[str] = []
+
+        def acquire(self, source_url: str):
+            self.calls.append(source_url)
+            return self.delegate.acquire(source_url)
+
+    counting = CountingAcquisition(acquisition)
+    bridge = DiscoveryAcquisitionService(registry, counting)
+
+    first = bridge.acquire_candidates([candidate])
+    counts_after_first = registry.registry_counts()
+    second = bridge.acquire_candidates([candidate])
+    counts_after_second = registry.registry_counts()
+
+    assert first.results[0].action == "acquired"
+    assert first.results[0].tournament_status == "CANONICALIZED"
+    assert first.results[0].raw_sha256 is not None
+    assert first.results[0].revision_id is not None
+    assert counts_after_first["download_attempts"] == 1
+    assert counts_after_first["tournament_revisions"] == 1
+    assert counts_after_first["canonical_games"] > 0
+
+    assert second.results[0].action == "skipped_existing"
+    assert second.results[0].tournament_id == first.results[0].tournament_id
+    assert second.results[0].tournament_status == "CANONICALIZED"
+    assert counting.calls == [candidate.source_url]
+    assert counts_after_second == counts_after_first

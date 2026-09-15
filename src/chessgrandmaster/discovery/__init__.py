@@ -15,6 +15,11 @@ from .chess_results import (
     DiscoveryResult,
     PlayerEvidence,
 )
+from .acquire import (
+    CandidateAcquisition,
+    DiscoveryAcquisitionResult,
+    DiscoveryAcquisitionService,
+)
 
 __all__ = [
     "AMBIGUOUS_TOKENS",
@@ -28,4 +33,7 @@ __all__ = [
     "ChessResultsDiscovery",
     "DiscoveryResult",
     "PlayerEvidence",
+    "CandidateAcquisition",
+    "DiscoveryAcquisitionResult",
+    "DiscoveryAcquisitionService",
 ]

@@ -640,6 +640,41 @@ class Registry:
                 raise KeyError(f"unknown source file id: {source_file_id}")
             return _row_dict(row)
 
+    def find_source_tournament(
+        self,
+        provider: str,
+        external_id: str,
+    ) -> dict[str, object] | None:
+        """Find one source tournament by its exact provider identity."""
+        if not isinstance(provider, str) or not provider:
+            raise ValueError("provider must be a non-empty string")
+        if not isinstance(external_id, str) or not external_id:
+            raise ValueError("external_id must be a non-empty string")
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT s.id AS source_id, s.name AS source_name,
+                       st.id AS source_tournament_id,
+                       st.external_id, st.tournament_id,
+                       t.status
+                FROM source_tournaments AS st
+                JOIN sources AS s ON s.id = st.source_id
+                JOIN tournaments AS t ON t.id = st.tournament_id
+                WHERE s.name = ? AND st.external_id = ?
+                """,
+                (provider, external_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "source_id": int(row["source_id"]),
+            "source_name": row["source_name"],
+            "source_tournament_id": int(row["source_tournament_id"]),
+            "tournament_id": int(row["tournament_id"]),
+            "external_id": row["external_id"],
+            "status": _state(str(row["status"])),
+        }
+
     def record_download_attempt(
         self,
         source_file_id: int | None = None,

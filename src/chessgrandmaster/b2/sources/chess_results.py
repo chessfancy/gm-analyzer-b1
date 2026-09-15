@@ -412,6 +412,15 @@ def _supported_host(host: str | None) -> bool:
     } or bool(_NUMBERED_HOST_RE.fullmatch(normalized))
 
 
+def _bare_provider_host(host: str | None) -> bool:
+    if not host:
+        return False
+    return host.casefold().rstrip(".") in {
+        "chess-results.com",
+        "www.chess-results.com",
+    }
+
+
 def _parsed_port(parsed) -> int:
     if parsed.port is not None:
         return parsed.port
@@ -437,19 +446,36 @@ def _approved_url(url: str, description: str) -> str:
     return url
 
 
-def _same_origin(base_url: str, candidate: str, description: str) -> str:
+def _same_origin(
+    base_url: str,
+    candidate: str,
+    description: str,
+    *,
+    allow_approved_shard_redirect: bool = False,
+) -> str:
     _approved_url(candidate, description)
     base = urlparse(base_url)
     target = urlparse(candidate)
-    if (
+    same_origin = (
         base.scheme.casefold(),
         (base.hostname or "").casefold().rstrip("."),
         _parsed_port(base),
-    ) != (
+    ) == (
         target.scheme.casefold(),
         (target.hostname or "").casefold().rstrip("."),
         _parsed_port(target),
+    )
+    if same_origin:
+        return candidate
+    if (
+        allow_approved_shard_redirect
+        and base.scheme.casefold() == target.scheme.casefold()
+        and _parsed_port(base) == _parsed_port(target)
+        and _bare_provider_host(base.hostname)
+        and bool(_NUMBERED_HOST_RE.fullmatch((target.hostname or "").casefold()))
     ):
+        return candidate
+    if not same_origin:
         raise RuntimeError(f"Chess-Results {description} is cross-origin")
     return candidate
 
@@ -942,7 +968,12 @@ class ChessResultsAdapter:
                 candidate = geturl()
                 if candidate:
                     final_url = str(candidate)
-            _same_origin(page_url, final_url, "final response URL")
+            _same_origin(
+                page_url,
+                final_url,
+                "final response URL",
+                allow_approved_shard_redirect=True,
+            )
         except RuntimeError:
             raise
         except (TimeoutError, socket.timeout) as exc:
@@ -1064,7 +1095,12 @@ class ChessResultsAdapter:
                 candidate = geturl()
                 if candidate:
                     final_url = str(candidate)
-            _same_origin(url, final_url, "final response URL")
+            _same_origin(
+                url,
+                final_url,
+                "final response URL",
+                allow_approved_shard_redirect=True,
+            )
             self.last_download_status = _response_status(response)
             self.last_download_content_type = _content_type(response)
             self.last_download_content_disposition = _response_header(
