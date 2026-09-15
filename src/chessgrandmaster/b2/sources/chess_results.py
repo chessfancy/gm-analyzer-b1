@@ -402,6 +402,17 @@ class _FetchedPage:
     html: str
 
 
+@dataclass(frozen=True)
+class PgnAvailability:
+    """Provider-side game-database availability for one source reference."""
+
+    available: bool
+    database_key: str
+    round_count: int
+    game_count: int
+    reason: str | None = None
+
+
 def _supported_host(host: str | None) -> bool:
     if not host:
         return False
@@ -773,11 +784,36 @@ def _parse_database_result(
     parser: _PageParser,
     requested_key: str,
 ) -> tuple[tuple[int, int], ...]:
-    rounds, matched = _rounds_from_rows(parser.table_rows, requested_key)
-    if not matched:
+    rounds = _database_rounds_for_key(parser, requested_key)
+    if rounds is None:
         raise RuntimeError(
             f"Chess-Results result does not identify database key {requested_key}"
         )
+    return rounds
+
+
+def _database_rounds_for_key(
+    parser: _PageParser,
+    requested_key: str,
+) -> tuple[tuple[int, int], ...] | None:
+    """Return rounds, or ``None`` for a valid result without the requested key."""
+    has_result_table = any(
+        key_index is not None and round_index is not None
+        for key_index, round_index in (
+            _header_indices(row) for row in parser.table_rows
+        )
+    )
+    if not has_result_table:
+        visible_text = " ".join(parser.visible_text.casefold().split())
+        if "no game was found with this selection" in visible_text:
+            return None
+        raise RuntimeError(
+            "Chess-Results result exposes no identifiable database table"
+        )
+
+    rounds, matched = _rounds_from_rows(parser.table_rows, requested_key)
+    if not matched:
+        return None
     if not rounds:
         raise RuntimeError(
             f"Chess-Results result for database key {requested_key} has no rounds"
@@ -1069,6 +1105,38 @@ class ChessResultsAdapter:
         page = self._fetch_page(ref.source_url)
         return self._descriptor_from_page(ref, page, _parse_page(page.html))
 
+    def probe_pgn(self, ref: SourceRef) -> PgnAvailability:
+        """Probe Game Database rows without downloading or writing a PGN."""
+        ref = self._validate_ref(ref)
+        database_key = database_key_from_ref(ref)
+
+        search_url = self._search_page_url(ref)
+        search_page = self._fetch_page(search_url)
+        search_parser = _parse_page(search_page.html)
+        search_form, key_control, search_submit = _search_form(search_parser)
+        result_page = self._submit_form(
+            search_form,
+            search_page.url,
+            search_submit,
+            {key_control.name: database_key},
+        )
+        result_parser = _parse_page(result_page.html)
+        rounds = _database_rounds_for_key(result_parser, database_key)
+        if rounds is None:
+            return PgnAvailability(
+                available=False,
+                database_key=database_key,
+                round_count=0,
+                game_count=0,
+                reason="no_game_database",
+            )
+        return PgnAvailability(
+            available=True,
+            database_key=database_key,
+            round_count=len(rounds),
+            game_count=sum(game_count for _, game_count in rounds),
+        )
+
     def _download_response(
         self,
         url: str,
@@ -1207,6 +1275,7 @@ class ChessResultsAdapter:
 
 __all__ = [
     "ChessResultsAdapter",
+    "PgnAvailability",
     "PROVIDER",
     "USER_AGENT",
     "database_key_from_ref",

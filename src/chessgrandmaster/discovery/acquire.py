@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Callable, Sequence
 
 from chessgrandmaster.b2.acquisition import AcquisitionService
 from chessgrandmaster.b2.registry import Registry
+from chessgrandmaster.b2.sources.chess_results import PgnAvailability
 
 from .chess_results import ChessResultsCandidate
 
@@ -66,6 +67,7 @@ class DiscoveryAcquisitionResult:
     attempted: int
     acquired: int
     skipped_existing: int
+    skipped_no_pgn: int
     failed: int
     results: tuple[CandidateAcquisition, ...]
 
@@ -75,6 +77,7 @@ class DiscoveryAcquisitionResult:
             "attempted": self.attempted,
             "acquired": self.acquired,
             "skipped_existing": self.skipped_existing,
+            "skipped_no_pgn": self.skipped_no_pgn,
             "failed": self.failed,
             "results": [result.to_dict() for result in self.results],
         }
@@ -87,9 +90,11 @@ class DiscoveryAcquisitionService:
         self,
         registry: Registry,
         acquisition: AcquisitionService,
+        pgn_probe: Callable[[ChessResultsCandidate], PgnAvailability],
     ) -> None:
         self.registry = registry
         self.acquisition = acquisition
+        self.pgn_probe = pgn_probe
 
     @staticmethod
     def _unique_candidates(
@@ -177,6 +182,19 @@ class DiscoveryAcquisitionService:
             error_message=_error_message(error),
         )
 
+    @staticmethod
+    def _no_pgn_result(candidate: ChessResultsCandidate) -> CandidateAcquisition:
+        return CandidateAcquisition(
+            provider=candidate.provider,
+            external_id=candidate.external_id,
+            source_url=candidate.source_url,
+            action="skipped_no_pgn",
+            tournament_id=None,
+            tournament_status=None,
+            raw_sha256=None,
+            revision_id=None,
+        )
+
     def acquire_candidates(
         self,
         candidates: Sequence[ChessResultsCandidate],
@@ -198,6 +216,13 @@ class DiscoveryAcquisitionService:
                 ):
                     results.append(self._existing_result(candidate, existing))
                     continue
+                availability = self.pgn_probe(candidate)
+                available = getattr(availability, "available", None)
+                if not isinstance(available, bool):
+                    raise TypeError("PGN availability probe returned an invalid result")
+                if not available:
+                    results.append(self._no_pgn_result(candidate))
+                    continue
                 acquisition_result = self.acquisition.acquire(candidate.source_url)
             except Exception as exc:
                 results.append(self._failed_result(candidate, exc, existing))
@@ -208,12 +233,16 @@ class DiscoveryAcquisitionService:
         skipped_existing = sum(
             result.action == "skipped_existing" for result in results
         )
+        skipped_no_pgn = sum(
+            result.action == "skipped_no_pgn" for result in results
+        )
         failed = sum(result.action == "failed" for result in results)
         return DiscoveryAcquisitionResult(
             discovered=len(unique_candidates),
             attempted=len(results),
             acquired=acquired,
             skipped_existing=skipped_existing,
+            skipped_no_pgn=skipped_no_pgn,
             failed=failed,
             results=tuple(results),
         )

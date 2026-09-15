@@ -37,6 +37,29 @@ class _FakeAcquisition:
         return outcome
 
 
+class _FakePgnProbe:
+    def __init__(self, outcomes):
+        self.outcomes = outcomes
+        self.calls: list[str] = []
+
+    def __call__(self, candidate):
+        self.calls.append(candidate.source_url)
+        outcome = self.outcomes[candidate.source_url]
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
+def _available_probe(_candidate):
+    return SimpleNamespace(
+        available=True,
+        database_key="1450909",
+        round_count=9,
+        game_count=72,
+        reason=None,
+    )
+
+
 def _register_candidate(
     registry: Registry,
     candidate: ChessResultsCandidate,
@@ -72,7 +95,7 @@ def test_new_candidate_is_acquired_and_returns_structured_result(tmp_path):
             )
         }
     )
-    service = DiscoveryAcquisitionService(registry, acquisition)
+    service = DiscoveryAcquisitionService(registry, acquisition, _available_probe)
 
     batch = service.acquire_candidates([candidate])
 
@@ -103,7 +126,7 @@ def test_completed_candidate_is_skipped_without_acquisition(tmp_path, status):
     before = registry.registry_counts()
     acquisition = _FakeAcquisition({})
 
-    batch = DiscoveryAcquisitionService(registry, acquisition).acquire_candidates(
+    batch = DiscoveryAcquisitionService(registry, acquisition, _available_probe).acquire_candidates(
         [candidate]
     )
 
@@ -133,7 +156,7 @@ def test_incomplete_candidate_is_retried_through_acquisition(tmp_path, status):
         }
     )
 
-    batch = DiscoveryAcquisitionService(registry, acquisition).acquire_candidates(
+    batch = DiscoveryAcquisitionService(registry, acquisition, _available_probe).acquire_candidates(
         [candidate]
     )
 
@@ -166,7 +189,7 @@ def test_duplicate_candidate_input_is_acquired_once_in_original_order(tmp_path):
         }
     )
 
-    batch = DiscoveryAcquisitionService(registry, acquisition).acquire_candidates(
+    batch = DiscoveryAcquisitionService(registry, acquisition, _available_probe).acquire_candidates(
         [first, duplicate, second]
     )
 
@@ -199,7 +222,7 @@ def test_partial_acquisition_failure_does_not_stop_remaining_candidates(tmp_path
         }
     )
 
-    batch = DiscoveryAcquisitionService(registry, acquisition).acquire_candidates(
+    batch = DiscoveryAcquisitionService(registry, acquisition, _available_probe).acquire_candidates(
         candidates
     )
 
@@ -216,6 +239,162 @@ def test_partial_acquisition_failure_does_not_stop_remaining_candidates(tmp_path
     failure = batch.results[1]
     assert failure.error_type == "RuntimeError"
     assert failure.error_message == "provider download failed"
+
+
+def test_no_pgn_candidate_is_skipped_before_acquisition_or_registry_mutation(tmp_path):
+    registry = Registry(tmp_path / "registry.sqlite")
+    candidate = _candidate()
+    acquisition = _FakeAcquisition({})
+    probe = _FakePgnProbe(
+        {
+            candidate.source_url: SimpleNamespace(
+                available=False,
+                database_key="1450909",
+                round_count=0,
+                game_count=0,
+                reason="no_game_database",
+            )
+        }
+    )
+    before = registry.registry_counts()
+
+    batch = DiscoveryAcquisitionService(
+        registry,
+        acquisition,
+        probe,
+    ).acquire_candidates([candidate])
+
+    assert probe.calls == [candidate.source_url]
+    assert acquisition.calls == []
+    assert batch.results[0].action == "skipped_no_pgn"
+    assert batch.skipped_no_pgn == 1
+    assert batch.failed == 0
+    assert registry.registry_counts() == before
+
+
+def test_available_candidate_is_probed_then_acquired_once(tmp_path):
+    registry = Registry(tmp_path / "registry.sqlite")
+    candidate = _candidate()
+    acquisition = _FakeAcquisition(
+        {
+            candidate.source_url: SimpleNamespace(
+                tournament_id=17,
+                tournament_status="CANONICALIZED",
+                raw_sha256="a" * 64,
+                revision_id=23,
+            )
+        }
+    )
+    probe = _FakePgnProbe(
+        {
+            candidate.source_url: SimpleNamespace(
+                available=True,
+                database_key="1450909",
+                round_count=9,
+                game_count=72,
+                reason=None,
+            )
+        }
+    )
+
+    batch = DiscoveryAcquisitionService(
+        registry,
+        acquisition,
+        probe,
+    ).acquire_candidates([candidate])
+
+    assert probe.calls == [candidate.source_url]
+    assert acquisition.calls == [candidate.source_url]
+    assert batch.results[0].action == "acquired"
+    assert batch.acquired == 1
+    assert batch.skipped_no_pgn == 0
+    assert batch.failed == 0
+
+
+def test_mixed_batch_preserves_no_pgn_and_probe_failures_without_stopping(tmp_path):
+    registry = Registry(tmp_path / "registry.sqlite")
+    candidates = [
+        _candidate("tnr1450909"),
+        _candidate("tnr1450910"),
+        _candidate("tnr1450911"),
+        _candidate("tnr1450912"),
+        _candidate("tnr1450913"),
+    ]
+    _register_candidate(registry, candidates[2], "CANONICALIZED")
+    acquisition = _FakeAcquisition(
+        {
+            candidates[1].source_url: SimpleNamespace(
+                tournament_id=2,
+                tournament_status="CANONICALIZED",
+                raw_sha256="b" * 64,
+                revision_id=2,
+            ),
+            candidates[4].source_url: SimpleNamespace(
+                tournament_id=5,
+                tournament_status="CANONICALIZED",
+                raw_sha256="e" * 64,
+                revision_id=5,
+            ),
+        }
+    )
+    probe = _FakePgnProbe(
+        {
+            candidates[0].source_url: SimpleNamespace(available=False),
+            candidates[1].source_url: SimpleNamespace(available=True),
+            candidates[3].source_url: RuntimeError("probe HTTP failed"),
+            candidates[4].source_url: SimpleNamespace(available=True),
+        }
+    )
+
+    batch = DiscoveryAcquisitionService(
+        registry,
+        acquisition,
+        probe,
+    ).acquire_candidates(candidates)
+
+    assert probe.calls == [
+        candidates[0].source_url,
+        candidates[1].source_url,
+        candidates[3].source_url,
+        candidates[4].source_url,
+    ]
+    assert acquisition.calls == [candidates[1].source_url, candidates[4].source_url]
+    assert [result.action for result in batch.results] == [
+        "skipped_no_pgn",
+        "acquired",
+        "skipped_existing",
+        "failed",
+        "acquired",
+    ]
+    assert batch.discovered == batch.attempted == 5
+    assert batch.acquired == 2
+    assert batch.skipped_no_pgn == 1
+    assert batch.skipped_existing == 1
+    assert batch.failed == 1
+    assert batch.results[3].error_type == "RuntimeError"
+    assert batch.results[3].error_message == "probe HTTP failed"
+
+
+def test_completed_candidate_skips_before_availability_probe_on_rerun(tmp_path):
+    registry = Registry(tmp_path / "registry.sqlite")
+    candidate = _candidate()
+    _register_candidate(registry, candidate, "CANONICALIZED")
+    acquisition = _FakeAcquisition({})
+    probe = _FakePgnProbe(
+        {candidate.source_url: AssertionError("completed candidate was probed")}
+    )
+
+    batch = DiscoveryAcquisitionService(
+        registry,
+        acquisition,
+        probe,
+    ).acquire_candidates([candidate])
+
+    assert probe.calls == []
+    assert acquisition.calls == []
+    assert batch.results[0].action == "skipped_existing"
+    assert batch.skipped_no_pgn == 0
+    assert batch.failed == 0
 
 
 def test_cli_without_acquire_keeps_read_only_shape_and_does_not_build_b2(
@@ -310,8 +489,8 @@ def test_cli_acquire_uses_registry_and_root_overrides(monkeypatch, capsys, tmp_p
             seen["acquisition"] = (registry, store, workspace, adapters)
 
     class _FakeBridge:
-        def __init__(self, registry, acquisition):
-            seen["bridge"] = (registry, acquisition)
+        def __init__(self, registry, acquisition, pgn_probe):
+            seen["bridge"] = (registry, acquisition, pgn_probe)
 
         def acquire_candidates(self, candidates):
             assert tuple(candidates) == (candidate,)
@@ -320,6 +499,7 @@ def test_cli_acquire_uses_registry_and_root_overrides(monkeypatch, capsys, tmp_p
                 attempted=1,
                 acquired=1,
                 skipped_existing=0,
+                skipped_no_pgn=0,
                 failed=0,
                 results=(
                     CandidateAcquisition(
@@ -400,7 +580,7 @@ def test_cli_acquire_failure_returns_one_json_object_and_exit_one(
             return DiscoveryResult((first, second), ())
 
     class _FakeBridge:
-        def __init__(self, registry, acquisition):
+        def __init__(self, registry, acquisition, pgn_probe):
             pass
 
         def acquire_candidates(self, candidates):
@@ -409,6 +589,7 @@ def test_cli_acquire_failure_returns_one_json_object_and_exit_one(
                 attempted=2,
                 acquired=1,
                 skipped_existing=0,
+                skipped_no_pgn=0,
                 failed=1,
                 results=(
                     CandidateAcquisition(

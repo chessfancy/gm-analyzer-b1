@@ -177,7 +177,33 @@ def _build_acquisition_service(
         workspace=root_path / "workspace",
         adapters=build_adapters(),
     )
-    return DiscoveryAcquisitionService(registry, acquisition)
+
+    def pgn_probe(candidate):
+        adapter = acquisition.adapters.get(candidate.provider)
+        if adapter is None:
+            raise ValueError(
+                f"no acquisition adapter for provider {candidate.provider!r}"
+            )
+        refs = adapter.discover(candidate.source_url)
+        if len(refs) != 1:
+            raise RuntimeError(
+                f"provider {candidate.provider!r} returned an unexpected "
+                "source-reference count for candidate"
+            )
+        ref = refs[0]
+        if (
+            ref.provider != candidate.provider
+            or ref.external_id.casefold() != candidate.external_id.casefold()
+        ):
+            raise RuntimeError("provider source reference does not match candidate")
+        probe = getattr(adapter, "probe_pgn", None)
+        if not callable(probe):
+            raise RuntimeError(
+                f"provider {candidate.provider!r} has no PGN availability probe"
+            )
+        return probe(ref)
+
+    return DiscoveryAcquisitionService(registry, acquisition, pgn_probe)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

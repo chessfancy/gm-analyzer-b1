@@ -437,7 +437,13 @@ def test_discovery_acquisition_rerun_skips_completed_source_without_new_revision
             return self.delegate.acquire(source_url)
 
     counting = CountingAcquisition(acquisition)
-    bridge = DiscoveryAcquisitionService(registry, counting)
+    adapter = acquisition.adapters["chess-results"]
+
+    def probe(candidate):
+        ref = adapter.discover(candidate.source_url)[0]
+        return adapter.probe_pgn(ref)
+
+    bridge = DiscoveryAcquisitionService(registry, counting, probe)
 
     first = bridge.acquire_candidates([candidate])
     counts_after_first = registry.registry_counts()

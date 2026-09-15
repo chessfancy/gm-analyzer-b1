@@ -12,6 +12,7 @@ import pytest
 from chessgrandmaster.b2.sources.base import SourceDescriptor, SourceRef
 from chessgrandmaster.b2.sources.chess_results import (
     ChessResultsAdapter,
+    PgnAvailability,
     _available_rounds,
     _download_form,
     _parse_page,
@@ -381,6 +382,85 @@ def test_database_result_is_rejected_when_no_row_matches_requested_key(tmp_path)
     assert len(opener.request_records) == 2
     assert not destination.exists()
     assert not Path(f"{destination}.part").exists()
+
+
+def test_probe_reports_available_rounds_and_games_without_download_request():
+    adapter, opener = _workflow(
+        result_fixture="chess_results_database_available_72.html",
+    )
+    ref = adapter.discover(SOURCE_URL)[0]
+
+    availability = adapter.probe_pgn(ref)
+
+    assert availability == PgnAvailability(
+        available=True,
+        database_key="1450909",
+        round_count=9,
+        game_count=72,
+        reason=None,
+    )
+    assert [record["url"] for record in opener.request_records] == [
+        SEARCH_URL,
+        SEARCH_URL,
+    ]
+    assert all("download" not in str(record["url"]) for record in opener.request_records)
+
+
+def test_probe_reports_no_game_database_for_valid_result_without_requested_key():
+    adapter, opener = _workflow(
+        result_fixture="chess_results_database_wrong.html",
+    )
+    ref = adapter.discover(SOURCE_URL)[0]
+
+    availability = adapter.probe_pgn(ref)
+
+    assert availability == PgnAvailability(
+        available=False,
+        database_key="1450909",
+        round_count=0,
+        game_count=0,
+        reason="no_game_database",
+    )
+    assert len(opener.request_records) == 2
+
+
+def test_probe_reports_no_game_database_marker_without_result_table():
+    adapter, opener = _workflow(
+        result_fixture="chess_results_database_no_game.html",
+    )
+    ref = adapter.discover(SOURCE_URL)[0]
+
+    availability = adapter.probe_pgn(ref)
+
+    assert availability == PgnAvailability(
+        available=False,
+        database_key="1450909",
+        round_count=0,
+        game_count=0,
+        reason="no_game_database",
+    )
+    assert len(opener.request_records) == 2
+
+
+def test_probe_does_not_treat_another_database_key_as_available():
+    adapter, _ = _workflow(result_fixture="chess_results_database_wrong.html")
+    ref = adapter.discover(SOURCE_URL)[0]
+
+    availability = adapter.probe_pgn(ref)
+
+    assert availability.available is False
+    assert availability.database_key == "1450909"
+    assert availability.reason == "no_game_database"
+
+
+def test_probe_rejects_malformed_result_page_as_operational_error():
+    adapter, opener = _workflow(result_fixture="chess_results_tournament.html")
+    ref = adapter.discover(SOURCE_URL)[0]
+
+    with pytest.raises(RuntimeError, match="identifiable database table"):
+        adapter.probe_pgn(ref)
+
+    assert len(opener.request_records) == 2
 
 
 def test_result_rounds_and_game_counts_are_parsed_from_game_rows():
