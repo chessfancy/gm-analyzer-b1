@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from datetime import date
 from io import BytesIO
 import hashlib
 import json
@@ -463,3 +464,111 @@ def test_discovery_acquisition_rerun_skips_completed_source_without_new_revision
     assert second.results[0].tournament_status == "CANONICALIZED"
     assert counting.calls == [candidate.source_url]
     assert counts_after_second == counts_after_first
+
+
+def _refresh_candidate() -> ChessResultsCandidate:
+    return ChessResultsCandidate(
+        provider="chess-results",
+        external_id="tnr1450909",
+        source_url=NORMALIZED_SOURCE_URL,
+        title="Fixture tournament",
+        time_control_hint="standard",
+        evidence=("fixture",),
+        to_date="2026-09-13",
+    )
+
+
+def _bridge_for_fixture(acquisition, registry):
+    adapter = acquisition.adapters["chess-results"]
+
+    def probe(candidate):
+        ref = adapter.discover(candidate.source_url)[0]
+        return adapter.probe_pgn(ref)
+
+    return DiscoveryAcquisitionService(registry, acquisition, probe)
+
+
+def test_recent_refresh_unchanged_reuses_raw_source_and_revision(tmp_path):
+    acquisition, registry, store, _ = _service(tmp_path)
+    candidate = _refresh_candidate()
+
+    first = _bridge_for_fixture(acquisition, registry).acquire_candidates([candidate])
+    counts_after_first = registry.registry_counts()
+    second = _bridge_for_fixture(acquisition, registry).acquire_candidates(
+        [candidate],
+        refresh_recent_days=60,
+        as_of=date(2026, 9, 16),
+    )
+    counts_after_second = registry.registry_counts()
+
+    assert first.results[0].action == "acquired"
+    assert second.results[0].action == "refreshed_unchanged"
+    assert second.results[0].previous_raw_sha256 == first.results[0].raw_sha256
+    assert second.results[0].raw_sha256 == first.results[0].raw_sha256
+    assert counts_after_second["download_attempts"] == (
+        counts_after_first["download_attempts"] + 1
+    )
+    assert counts_after_second["source_files"] == counts_after_first["source_files"] == 1
+    assert (
+        counts_after_second["tournament_revisions"]
+        == counts_after_first["tournament_revisions"]
+        == 1
+    )
+    assert counts_after_second["canonical_games"] == counts_after_first["canonical_games"]
+    assert any(
+        first.results[0].raw_sha256 in key for key in store.list("")
+    )
+
+
+def test_recent_refresh_with_added_game_preserves_old_source_and_revision(tmp_path):
+    initial_pgn = _fixture("chess_results_games.pgn")
+    first_service, registry, store, _ = _service(tmp_path, pgn_bytes=initial_pgn)
+    candidate = _refresh_candidate()
+    first = _bridge_for_fixture(first_service, registry).acquire_candidates([candidate])
+
+    updated_pgn = initial_pgn + (
+        b'\n[Event "Added"]\n[Site "Fixture"]\n[Date "2026.09.14"]\n'
+        b'[Round "99"]\n[White "Extra White"]\n[Black "Extra Black"]\n'
+        b'[Result "1-0"]\n\n1. d4 d5 2. c4 e6 1-0\n'
+    )
+    second_service, _, _, _ = _service(tmp_path, pgn_bytes=updated_pgn)
+    second = _bridge_for_fixture(second_service, registry).acquire_candidates(
+        [candidate],
+        refresh_recent_days=60,
+        as_of=date(2026, 9, 16),
+    )
+
+    assert second.results[0].action == "refreshed_changed"
+    assert second.results[0].previous_raw_sha256 == first.results[0].raw_sha256
+    assert second.results[0].raw_sha256 != first.results[0].raw_sha256
+    object_keys = store.list("")
+    assert any(first.results[0].raw_sha256 in key for key in object_keys)
+    assert any(second.results[0].raw_sha256 in key for key in object_keys)
+    assert registry.registry_counts()["source_files"] == 2
+    assert registry.registry_counts()["tournament_revisions"] == 2
+    assert second.results[0].revision_id != first.results[0].revision_id
+
+
+
+def test_recent_refresh_raw_change_can_reuse_canonical_revision(tmp_path):
+    initial_pgn = _fixture("chess_results_games.pgn")
+    first_service, registry, store, _ = _service(tmp_path, pgn_bytes=initial_pgn)
+    candidate = _refresh_candidate()
+    first = _bridge_for_fixture(first_service, registry).acquire_candidates([candidate])
+
+    updated_pgn = initial_pgn + b"\n; provider-only note\n"
+    second_service, _, _, _ = _service(tmp_path, pgn_bytes=updated_pgn)
+    second = _bridge_for_fixture(second_service, registry).acquire_candidates(
+        [candidate],
+        refresh_recent_days=60,
+        as_of=date(2026, 9, 16),
+    )
+
+    assert second.results[0].action == "refreshed_changed"
+    assert second.results[0].raw_sha256 != first.results[0].raw_sha256
+    object_keys = store.list("")
+    assert any(first.results[0].raw_sha256 in key for key in object_keys)
+    assert any(second.results[0].raw_sha256 in key for key in object_keys)
+    assert registry.registry_counts()["source_files"] == 2
+    assert registry.registry_counts()["tournament_revisions"] == 1
+    assert second.results[0].revision_id == first.results[0].revision_id

@@ -675,6 +675,51 @@ class Registry:
             "status": _state(str(row["status"])),
         }
 
+    def find_latest_source_file(
+        self,
+        provider: str,
+        external_id: str,
+    ) -> dict[str, object] | None:
+        """Return the latest immutable source file for an exact provider identity."""
+        if not isinstance(provider, str) or not provider:
+            raise ValueError("provider must be a non-empty string")
+        if not isinstance(external_id, str) or not external_id:
+            raise ValueError("external_id must be a non-empty string")
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT sf.id AS source_file_id,
+                       sf.source_tournament_id,
+                       sf.tournament_id,
+                       sf.sha256,
+                       sf.byte_size,
+                       sf.downloaded_at
+                FROM source_files AS sf
+                JOIN source_tournaments AS st
+                  ON st.id = sf.source_tournament_id
+                JOIN sources AS s ON s.id = st.source_id
+                WHERE s.name = ? AND st.external_id = ?
+                ORDER BY COALESCE(sf.downloaded_at, sf.created_at) DESC,
+                         sf.id DESC
+                LIMIT 1
+                """,
+                (provider, external_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "source_file_id": int(row["source_file_id"]),
+            "source_tournament_id": int(row["source_tournament_id"]),
+            "tournament_id": (
+                None
+                if row["tournament_id"] is None
+                else int(row["tournament_id"])
+            ),
+            "sha256": row["sha256"],
+            "byte_size": int(row["byte_size"]),
+            "downloaded_at": row["downloaded_at"],
+        }
+
     def record_download_attempt(
         self,
         source_file_id: int | None = None,

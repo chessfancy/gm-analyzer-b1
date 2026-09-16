@@ -119,6 +119,53 @@ def test_registry_reuses_sources_and_exact_identities(tmp_path):
     assert rows_for(registry, "SELECT COUNT(*) FROM source_files")[0][0] == 1
 
 
+def test_find_latest_source_file_is_exact_and_deterministic(tmp_path):
+    registry = Registry(tmp_path / "registry.sqlite")
+    chess_results = registry.upsert_source("chess-results", "https://chess-results.com")
+    other = registry.upsert_source("other", "https://example.invalid")
+    tournament = registry.upsert_tournament("refresh-me", status="CANONICALIZED")
+    same_external_other = registry.upsert_tournament("other-refresh-me")
+    source_tournament = registry.upsert_source_tournament(
+        source_id=chess_results,
+        tournament_id=tournament,
+        external_id="tnr1450909",
+        source_url="https://chess-results.com/tnr1450909.aspx",
+    )
+    registry.upsert_source_tournament(
+        source_id=other,
+        tournament_id=same_external_other,
+        external_id="tnr1450909",
+        source_url="https://example.invalid/tnr1450909",
+    )
+    registry.record_source_file(
+        source_tournament_id=source_tournament,
+        object_key="raw/old.pgn",
+        filename="old.pgn",
+        sha256="a" * 64,
+        byte_size=10,
+        downloaded_at="2026-09-10T00:00:00Z",
+    )
+    registry.record_source_file(
+        source_tournament_id=source_tournament,
+        object_key="raw/new.pgn",
+        filename="new.pgn",
+        sha256="b" * 64,
+        byte_size=11,
+        downloaded_at="2026-09-11T00:00:00Z",
+    )
+
+    latest = registry.find_latest_source_file("chess-results", "tnr1450909")
+
+    assert latest is not None
+    assert latest["source_file_id"] == 2
+    assert latest["source_tournament_id"] == source_tournament
+    assert latest["tournament_id"] == tournament
+    assert latest["sha256"] == "b" * 64
+    assert latest["byte_size"] == 11
+    assert latest["downloaded_at"] == "2026-09-11T00:00:00Z"
+    assert registry.find_latest_source_file("other", "tnr1450909") is None
+
+
 def test_occurrences_preserve_conflicting_metadata_and_revision_membership(tmp_path):
     registry = Registry(tmp_path / "registry.sqlite")
     source_id = registry.upsert_source("fixture", "https://example.invalid", priority=20)

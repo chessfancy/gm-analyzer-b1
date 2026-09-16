@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 import json
 from types import SimpleNamespace
 
@@ -13,7 +14,11 @@ from chessgrandmaster.discovery.acquire import DiscoveryAcquisitionService
 SOURCE_URL = "https://chess-results.com/tnr1450909.aspx?lan=1"
 
 
-def _candidate(external_id: str = "tnr1450909") -> ChessResultsCandidate:
+def _candidate(
+    external_id: str = "tnr1450909",
+    *,
+    to_date: str | None = None,
+) -> ChessResultsCandidate:
     return ChessResultsCandidate(
         provider="chess-results",
         external_id=external_id,
@@ -21,6 +26,7 @@ def _candidate(external_id: str = "tnr1450909") -> ChessResultsCandidate:
         title="Fixture tournament",
         time_control_hint="standard",
         evidence=("fixture",),
+        to_date=to_date,
     )
 
 
@@ -64,6 +70,8 @@ def _register_candidate(
     registry: Registry,
     candidate: ChessResultsCandidate,
     status: str,
+    *,
+    end_date: str | None = None,
 ) -> int:
     source_id = registry.upsert_source(
         candidate.provider,
@@ -71,6 +79,7 @@ def _register_candidate(
     )
     tournament_id = registry.upsert_tournament(
         f"{candidate.provider}-{candidate.external_id}",
+        end_date=end_date,
         status=status,
     )
     registry.upsert_source_tournament(
@@ -80,6 +89,25 @@ def _register_candidate(
         source_url=candidate.source_url,
     )
     return tournament_id
+
+
+def _record_raw_source(
+    registry: Registry,
+    candidate: ChessResultsCandidate,
+    sha256: str,
+) -> int:
+    existing = registry.find_source_tournament(
+        candidate.provider,
+        candidate.external_id,
+    )
+    assert existing is not None
+    return registry.record_source_file(
+        source_tournament_id=int(existing["source_tournament_id"]),
+        object_key=f"raw/{sha256}/fixture.pgn",
+        filename="fixture.pgn",
+        sha256=sha256,
+        byte_size=10,
+    )
 
 
 def test_new_candidate_is_acquired_and_returns_structured_result(tmp_path):
@@ -656,3 +684,223 @@ def test_cli_acquire_failure_returns_one_json_object_and_exit_one(
     assert payload["acquisition"]["acquired"] == 1
     assert payload["acquisition"]["failed"] == 1
     assert len(payload["acquisition"]["results"]) == 2
+
+
+def test_late_pgn_availability_is_retried_without_persistent_negative_state(tmp_path):
+    registry = Registry(tmp_path / "registry.sqlite")
+    candidate = _candidate()
+    acquisition = _FakeAcquisition(
+        {
+            candidate.source_url: SimpleNamespace(
+                tournament_id=1,
+                tournament_status="CANONICALIZED",
+                raw_sha256="a" * 64,
+                revision_id=1,
+            )
+        }
+    )
+    probe_results = iter(
+        [
+            SimpleNamespace(
+                available=False,
+                database_key="1450909",
+                round_count=0,
+                game_count=0,
+                reason="no_game_database",
+            ),
+            _available_probe(candidate),
+        ]
+    )
+    probe = lambda _candidate: next(probe_results)
+    service = DiscoveryAcquisitionService(registry, acquisition, probe)
+
+    first = service.acquire_candidates([candidate])
+    second = service.acquire_candidates([candidate])
+
+    assert first.results[0].action == "skipped_no_pgn"
+    assert second.results[0].action == "acquired"
+    assert acquisition.calls == [candidate.source_url]
+    assert registry.find_source_tournament(candidate.provider, candidate.external_id) is None
+
+
+def test_recent_canonicalized_refresh_unchanged_tracks_previous_raw_sha(tmp_path):
+    registry = Registry(tmp_path / "registry.sqlite")
+    candidate = _candidate(to_date="2026-09-13")
+    _register_candidate(
+        registry,
+        candidate,
+        "CANONICALIZED",
+        end_date=candidate.to_date,
+    )
+    _record_raw_source(registry, candidate, "a" * 64)
+    acquisition = _FakeAcquisition(
+        {
+            candidate.source_url: SimpleNamespace(
+                tournament_id=1,
+                tournament_status="CANONICALIZED",
+                raw_sha256="a" * 64,
+                revision_id=7,
+            )
+        }
+    )
+    probe = _FakePgnProbe({candidate.source_url: _available_probe(candidate)})
+
+    batch = DiscoveryAcquisitionService(registry, acquisition, probe).acquire_candidates(
+        [candidate],
+        refresh_recent_days=60,
+        as_of=date(2026, 9, 16),
+    )
+
+    outcome = batch.results[0]
+    assert outcome.action == "refreshed_unchanged"
+    assert outcome.previous_raw_sha256 == "a" * 64
+    assert outcome.raw_sha256 == "a" * 64
+    assert batch.acquired == 0
+    assert batch.refreshed_unchanged == 1
+    assert batch.refreshed_changed == 0
+    assert batch.refresh_unavailable == 0
+    assert probe.calls == [candidate.source_url]
+    assert acquisition.calls == [candidate.source_url]
+
+
+@pytest.mark.parametrize(
+    ("end_date", "action", "probe_called"),
+    [
+        ("2026-07-18", "refreshed_unchanged", True),
+        ("2026-07-17", "skipped_existing", False),
+    ],
+)
+def test_recent_refresh_uses_inclusive_60_day_boundary(
+    tmp_path,
+    end_date,
+    action,
+    probe_called,
+):
+    registry = Registry(tmp_path / "registry.sqlite")
+    candidate = _candidate(to_date=end_date)
+    _register_candidate(registry, candidate, "CANONICALIZED", end_date=end_date)
+    _record_raw_source(registry, candidate, "a" * 64)
+    acquisition = _FakeAcquisition(
+        {
+            candidate.source_url: SimpleNamespace(
+                tournament_id=1,
+                tournament_status="CANONICALIZED",
+                raw_sha256="a" * 64,
+                revision_id=7,
+            )
+        }
+    )
+    probe = _FakePgnProbe({candidate.source_url: _available_probe(candidate)})
+
+    batch = DiscoveryAcquisitionService(registry, acquisition, probe).acquire_candidates(
+        [candidate],
+        refresh_recent_days=60,
+        as_of=date(2026, 9, 16),
+    )
+
+    assert batch.results[0].action == action
+    assert bool(probe.calls) is probe_called
+    assert bool(acquisition.calls) is probe_called
+
+
+def test_refresh_disabled_preserves_completed_skip_semantics(tmp_path):
+    registry = Registry(tmp_path / "registry.sqlite")
+    candidate = _candidate(to_date="2026-09-13")
+    tournament_id = _register_candidate(
+        registry,
+        candidate,
+        "CANONICALIZED",
+        end_date=candidate.to_date,
+    )
+    probe = _FakePgnProbe({})
+    acquisition = _FakeAcquisition({})
+
+    batch = DiscoveryAcquisitionService(registry, acquisition, probe).acquire_candidates(
+        [candidate],
+        refresh_recent_days=0,
+        as_of=date(2026, 9, 16),
+    )
+
+    assert batch.results[0].action == "skipped_existing"
+    assert batch.results[0].tournament_id == tournament_id
+    assert probe.calls == []
+    assert acquisition.calls == []
+
+
+@pytest.mark.parametrize("status", ["SHARDED", "READY"])
+def test_recent_sharded_or_ready_tournament_is_not_refreshed(tmp_path, status):
+    registry = Registry(tmp_path / "registry.sqlite")
+    candidate = _candidate(to_date="2026-09-13")
+    _register_candidate(registry, candidate, status, end_date=candidate.to_date)
+    probe = _FakePgnProbe({})
+    acquisition = _FakeAcquisition({})
+
+    batch = DiscoveryAcquisitionService(registry, acquisition, probe).acquire_candidates(
+        [candidate],
+        refresh_recent_days=60,
+        as_of=date(2026, 9, 16),
+    )
+
+    assert batch.results[0].action == "skipped_existing"
+    assert probe.calls == []
+    assert acquisition.calls == []
+
+
+@pytest.mark.parametrize("to_date", [None, "not-a-date", "2026-09-17"])
+def test_missing_malformed_or_future_end_date_does_not_force_refresh(
+    tmp_path,
+    to_date,
+):
+    registry = Registry(tmp_path / "registry.sqlite")
+    candidate = _candidate(to_date=to_date)
+    _register_candidate(registry, candidate, "CANONICALIZED", end_date=to_date)
+    probe = _FakePgnProbe({})
+    acquisition = _FakeAcquisition({})
+
+    batch = DiscoveryAcquisitionService(registry, acquisition, probe).acquire_candidates(
+        [candidate],
+        refresh_recent_days=60,
+        as_of=date(2026, 9, 16),
+    )
+
+    assert batch.results[0].action == "skipped_existing"
+    assert probe.calls == []
+    assert acquisition.calls == []
+
+
+def test_recent_refresh_unavailable_preserves_existing_registry_content(tmp_path):
+    registry = Registry(tmp_path / "registry.sqlite")
+    candidate = _candidate(to_date="2026-09-13")
+    tournament_id = _register_candidate(
+        registry,
+        candidate,
+        "CANONICALIZED",
+        end_date=candidate.to_date,
+    )
+    _record_raw_source(registry, candidate, "a" * 64)
+    before = registry.registry_counts()
+    probe = _FakePgnProbe(
+        {
+            candidate.source_url: SimpleNamespace(
+                available=False,
+                database_key="1450909",
+                round_count=0,
+                game_count=0,
+                reason="no_game_database",
+            )
+        }
+    )
+    acquisition = _FakeAcquisition({})
+
+    batch = DiscoveryAcquisitionService(registry, acquisition, probe).acquire_candidates(
+        [candidate],
+        refresh_recent_days=60,
+        as_of=date(2026, 9, 16),
+    )
+
+    assert batch.results[0].action == "refresh_unavailable"
+    assert batch.results[0].previous_raw_sha256 == "a" * 64
+    assert batch.refresh_unavailable == 1
+    assert acquisition.calls == []
+    assert registry.registry_counts() == before
+    assert registry.get_tournament_status(tournament_id) == "CANONICALIZED"

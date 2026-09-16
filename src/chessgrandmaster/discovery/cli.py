@@ -39,6 +39,16 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def _non_negative_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a non-negative integer") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be a non-negative integer")
+    return parsed
+
+
 def _add_http_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--limit", type=_positive_int)
@@ -73,12 +83,20 @@ def _add_corpus_options(
     parser: argparse.ArgumentParser,
     *,
     allow_country: bool,
+    allow_refresh: bool = False,
 ) -> None:
     parser.add_argument("--year", type=int, default=2026)
     parser.add_argument("--max-lines", type=_positive_int, default=2000)
     parser.add_argument("--limit", type=_positive_int)
     if allow_country:
         parser.add_argument("--country")
+    if allow_refresh:
+        parser.add_argument(
+            "--refresh-recent-days",
+            type=_non_negative_int,
+            default=60,
+            help="refresh completed recent tournaments from this many days (default: 60)",
+        )
     parser.add_argument("--report")
     _add_http_options_without_limit(parser)
     _add_acquisition_options(parser)
@@ -144,13 +162,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "corpus",
         help="scan the full-year standard/classical downloadable corpus",
     )
-    _add_corpus_options(corpus, allow_country=False)
+    _add_corpus_options(corpus, allow_country=False, allow_refresh=True)
 
     downloadable = modes.add_parser(
         "downloadable",
         help="diagnostic downloadable Tournament Database scan",
     )
-    _add_corpus_options(downloadable, allow_country=True)
+    _add_corpus_options(downloadable, allow_country=True, allow_refresh=False)
     return parser
 
 
@@ -230,6 +248,7 @@ def _corpus_report(
     max_lines: int,
     country: str | None,
     acquisition: DiscoveryAcquisitionResult | None,
+    refresh_recent_days: int = 0,
 ) -> dict[str, object]:
     action_by_identity = {}
     if acquisition is not None:
@@ -248,6 +267,7 @@ def _corpus_report(
                 "acquisition_action": outcome.get("action"),
                 "tournament_id": outcome.get("tournament_id"),
                 "revision_id": outcome.get("revision_id"),
+                "previous_raw_sha256": outcome.get("previous_raw_sha256"),
                 "raw_sha256": outcome.get("raw_sha256"),
             }
         )
@@ -257,6 +277,9 @@ def _corpus_report(
             "acquired": 0,
             "skipped_existing": 0,
             "skipped_no_pgn": 0,
+            "refreshed_unchanged": 0,
+            "refreshed_changed": 0,
+            "refresh_unavailable": 0,
             "failed": 0,
         }
     else:
@@ -264,6 +287,9 @@ def _corpus_report(
             "acquired": acquisition.acquired,
             "skipped_existing": acquisition.skipped_existing,
             "skipped_no_pgn": acquisition.skipped_no_pgn,
+            "refreshed_unchanged": acquisition.refreshed_unchanged,
+            "refreshed_changed": acquisition.refreshed_changed,
+            "refresh_unavailable": acquisition.refresh_unavailable,
             "failed": acquisition.failed,
         }
     return {
@@ -273,6 +299,7 @@ def _corpus_report(
         "games_available": True,
         "max_lines": max_lines,
         "country": country,
+        "refresh_recent_days": refresh_recent_days,
         "complete": result.complete,
         "windows": [window.to_dict() for window in result.windows],
         "saturated_windows": [
@@ -298,6 +325,7 @@ def _write_corpus_report(
     max_lines: int,
     country: str | None,
     acquisition: DiscoveryAcquisitionResult | None,
+    refresh_recent_days: int = 0,
 ) -> None:
     report_path = Path(path).expanduser()
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -309,6 +337,7 @@ def _write_corpus_report(
                 max_lines=max_lines,
                 country=country,
                 acquisition=acquisition,
+                refresh_recent_days=refresh_recent_days,
             ),
             ensure_ascii=False,
             sort_keys=True,
@@ -449,6 +478,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     max_lines=args.max_lines,
                     country=getattr(args, "country", None),
                     acquisition=None,
+                    refresh_recent_days=getattr(args, "refresh_recent_days", 0),
                 )
             except Exception as exc:
                 _emit(_error_payload(args.provider, args.mode, exc))
@@ -466,6 +496,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     max_lines=args.max_lines,
                     country=getattr(args, "country", None),
                     acquisition=None,
+                    refresh_recent_days=getattr(args, "refresh_recent_days", 0),
                 )
             except Exception as exc:
                 _emit(_error_payload(args.provider, args.mode, exc))
@@ -478,7 +509,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.registry,
             args.root,
         )
-        acquisition = acquisition_service.acquire_candidates(result.candidates)
+        if args.mode == "corpus":
+            acquisition = acquisition_service.acquire_candidates(
+                result.candidates,
+                refresh_recent_days=args.refresh_recent_days,
+            )
+        else:
+            acquisition = acquisition_service.acquire_candidates(result.candidates)
     except Exception as exc:
         _emit(_error_payload(args.provider, args.mode, exc))
         return 2
@@ -494,6 +531,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 max_lines=args.max_lines,
                 country=getattr(args, "country", None),
                 acquisition=acquisition,
+                refresh_recent_days=getattr(args, "refresh_recent_days", 0),
             )
         except Exception as exc:
             _emit(_error_payload(args.provider, args.mode, exc))

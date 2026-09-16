@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from typing import Callable, Sequence
 
 from chessgrandmaster.b2.acquisition import AcquisitionService
@@ -43,6 +44,7 @@ class CandidateAcquisition:
     revision_id: int | None
     error_type: str | None = None
     error_message: str | None = None
+    previous_raw_sha256: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -54,6 +56,7 @@ class CandidateAcquisition:
             "tournament_status": self.tournament_status,
             "raw_sha256": self.raw_sha256,
             "revision_id": self.revision_id,
+            "previous_raw_sha256": self.previous_raw_sha256,
             "error_type": self.error_type,
             "error_message": self.error_message,
         }
@@ -70,6 +73,9 @@ class DiscoveryAcquisitionResult:
     skipped_no_pgn: int
     failed: int
     results: tuple[CandidateAcquisition, ...]
+    refreshed_unchanged: int = 0
+    refreshed_changed: int = 0
+    refresh_unavailable: int = 0
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -79,6 +85,9 @@ class DiscoveryAcquisitionResult:
             "skipped_existing": self.skipped_existing,
             "skipped_no_pgn": self.skipped_no_pgn,
             "failed": self.failed,
+            "refreshed_unchanged": self.refreshed_unchanged,
+            "refreshed_changed": self.refreshed_changed,
+            "refresh_unavailable": self.refresh_unavailable,
             "results": [result.to_dict() for result in self.results],
         }
 
@@ -131,16 +140,41 @@ class DiscoveryAcquisitionService:
         )
 
     @staticmethod
+    def _refresh_eligible(
+        candidate: ChessResultsCandidate,
+        *,
+        refresh_recent_days: int,
+        as_of: date,
+    ) -> bool:
+        if refresh_recent_days <= 0 or candidate.to_date is None:
+            return False
+        try:
+            end_date = date.fromisoformat(candidate.to_date)
+        except ValueError:
+            return False
+        age = (as_of - end_date).days
+        return 0 <= age <= refresh_recent_days
+
+    @staticmethod
+    def _raw_sha256(source_file: dict[str, object] | None) -> str | None:
+        if source_file is None or source_file.get("sha256") is None:
+            return None
+        return str(source_file["sha256"])
+
+    @staticmethod
     def _acquired_result(
         candidate: ChessResultsCandidate,
         acquisition_result: object,
+        *,
+        action: str = "acquired",
+        previous_raw_sha256: str | None = None,
     ) -> CandidateAcquisition:
         status = getattr(acquisition_result, "tournament_status", None)
         return CandidateAcquisition(
             provider=candidate.provider,
             external_id=candidate.external_id,
             source_url=candidate.source_url,
-            action="acquired",
+            action=action,
             tournament_id=_optional_int(
                 getattr(acquisition_result, "tournament_id", None)
             ),
@@ -153,6 +187,7 @@ class DiscoveryAcquisitionService:
             revision_id=_optional_int(
                 getattr(acquisition_result, "revision_id", None)
             ),
+            previous_raw_sha256=previous_raw_sha256,
         )
 
     @staticmethod
@@ -160,6 +195,7 @@ class DiscoveryAcquisitionService:
         candidate: ChessResultsCandidate,
         error: BaseException,
         existing: dict[str, object] | None,
+        previous_raw_sha256: str | None = None,
     ) -> CandidateAcquisition:
         return CandidateAcquisition(
             provider=candidate.provider,
@@ -180,6 +216,7 @@ class DiscoveryAcquisitionService:
             revision_id=None,
             error_type=type(error).__name__,
             error_message=_error_message(error),
+            previous_raw_sha256=previous_raw_sha256,
         )
 
     @staticmethod
@@ -195,16 +232,51 @@ class DiscoveryAcquisitionService:
             revision_id=None,
         )
 
+    @staticmethod
+    def _refresh_unavailable_result(
+        candidate: ChessResultsCandidate,
+        existing: dict[str, object],
+        previous_raw_sha256: str | None,
+    ) -> CandidateAcquisition:
+        return CandidateAcquisition(
+            provider=candidate.provider,
+            external_id=candidate.external_id,
+            source_url=candidate.source_url,
+            action="refresh_unavailable",
+            tournament_id=_optional_int(existing.get("tournament_id")),
+            tournament_status=(
+                None
+                if existing.get("status") is None
+                else str(existing["status"])
+            ),
+            raw_sha256=None,
+            revision_id=None,
+            previous_raw_sha256=previous_raw_sha256,
+        )
+
     def acquire_candidates(
         self,
         candidates: Sequence[ChessResultsCandidate],
+        *,
+        refresh_recent_days: int = 0,
+        as_of: date | None = None,
     ) -> DiscoveryAcquisitionResult:
         """Process unique candidates without allowing one failure to abort the batch."""
+        if isinstance(refresh_recent_days, bool) or not isinstance(
+            refresh_recent_days, int
+        ):
+            raise TypeError("refresh_recent_days must be an integer")
+        if refresh_recent_days < 0:
+            raise ValueError("refresh_recent_days must not be negative")
+        if as_of is not None and not isinstance(as_of, date):
+            raise TypeError("as_of must be a date")
+        refresh_as_of = as_of or date.today()
         unique_candidates = self._unique_candidates(candidates)
         results: list[CandidateAcquisition] = []
 
         for candidate in unique_candidates:
             existing: dict[str, object] | None = None
+            previous_raw_sha256: str | None = None
             try:
                 existing = self.registry.find_source_tournament(
                     candidate.provider,
@@ -214,6 +286,55 @@ class DiscoveryAcquisitionService:
                     existing is not None
                     and str(existing.get("status")) in _COMPLETED_STATUSES
                 ):
+                    if (
+                        str(existing.get("status")) == "CANONICALIZED"
+                        and self._refresh_eligible(
+                            candidate,
+                            refresh_recent_days=refresh_recent_days,
+                            as_of=refresh_as_of,
+                        )
+                    ):
+                        latest_source_file = self.registry.find_latest_source_file(
+                            candidate.provider,
+                            candidate.external_id,
+                        )
+                        previous_raw_sha256 = self._raw_sha256(latest_source_file)
+                        availability = self.pgn_probe(candidate)
+                        available = getattr(availability, "available", None)
+                        if not isinstance(available, bool):
+                            raise TypeError(
+                                "PGN availability probe returned an invalid result"
+                            )
+                        if not available:
+                            results.append(
+                                self._refresh_unavailable_result(
+                                    candidate,
+                                    existing,
+                                    previous_raw_sha256,
+                                )
+                            )
+                            continue
+                        acquisition_result = self.acquisition.acquire(
+                            candidate.source_url
+                        )
+                        raw_sha256 = getattr(acquisition_result, "raw_sha256", None)
+                        raw_sha256 = (
+                            None if raw_sha256 is None else str(raw_sha256)
+                        )
+                        action = (
+                            "refreshed_unchanged"
+                            if raw_sha256 == previous_raw_sha256
+                            else "refreshed_changed"
+                        )
+                        results.append(
+                            self._acquired_result(
+                                candidate,
+                                acquisition_result,
+                                action=action,
+                                previous_raw_sha256=previous_raw_sha256,
+                            )
+                        )
+                        continue
                     results.append(self._existing_result(candidate, existing))
                     continue
                 availability = self.pgn_probe(candidate)
@@ -225,7 +346,14 @@ class DiscoveryAcquisitionService:
                     continue
                 acquisition_result = self.acquisition.acquire(candidate.source_url)
             except Exception as exc:
-                results.append(self._failed_result(candidate, exc, existing))
+                results.append(
+                    self._failed_result(
+                        candidate,
+                        exc,
+                        existing,
+                        previous_raw_sha256,
+                    )
+                )
                 continue
             results.append(self._acquired_result(candidate, acquisition_result))
 
@@ -237,6 +365,15 @@ class DiscoveryAcquisitionService:
             result.action == "skipped_no_pgn" for result in results
         )
         failed = sum(result.action == "failed" for result in results)
+        refreshed_unchanged = sum(
+            result.action == "refreshed_unchanged" for result in results
+        )
+        refreshed_changed = sum(
+            result.action == "refreshed_changed" for result in results
+        )
+        refresh_unavailable = sum(
+            result.action == "refresh_unavailable" for result in results
+        )
         return DiscoveryAcquisitionResult(
             discovered=len(unique_candidates),
             attempted=len(results),
@@ -245,6 +382,9 @@ class DiscoveryAcquisitionService:
             skipped_no_pgn=skipped_no_pgn,
             failed=failed,
             results=tuple(results),
+            refreshed_unchanged=refreshed_unchanged,
+            refreshed_changed=refreshed_changed,
+            refresh_unavailable=refresh_unavailable,
         )
 
 

@@ -100,6 +100,7 @@ def test_corpus_cli_scans_full_set_before_limit_and_writes_deterministic_report(
     assert report["only_finished"] is True
     assert report["games_available"] is True
     assert report["complete"] is True
+    assert report["refresh_recent_days"] == 60
     assert report["candidate_count"] == 1
     assert report["priority_counts"] == {
         "book_high": 0,
@@ -185,9 +186,10 @@ def test_corpus_acquire_routes_every_post_priority_candidate_to_existing_bridge(
             return result
 
     class _FakeBridge:
-        def acquire_candidates(self, received):
+        def acquire_candidates(self, received, *, refresh_recent_days):
             received = tuple(received)
             seen["received"] = received
+            seen["refresh_recent_days"] = refresh_recent_days
             return DiscoveryAcquisitionResult(
                 discovered=len(received),
                 attempted=len(received),
@@ -229,12 +231,72 @@ def test_corpus_acquire_routes_every_post_priority_candidate_to_existing_bridge(
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["acquisition"]["acquired"] == 2
+    assert payload["acquisition"]["refreshed_unchanged"] == 0
+    assert payload["acquisition"]["refreshed_changed"] == 0
+    assert payload["acquisition"]["refresh_unavailable"] == 0
     assert [item.external_id for item in seen["received"]] == [
         "tnr3001",
         "tnr3002",
     ]
     assert seen["scan"]["limit"] is None
     assert seen["enrich"] == (2026, None)
+    assert seen["refresh_recent_days"] == 60
+
+
+def test_corpus_cli_allows_disabling_recent_refresh(monkeypatch, capsys, tmp_path):
+    from chessgrandmaster.discovery import cli
+
+    candidate = _candidate("tnr3501", "GER")
+    scanned = CorpusDiscoveryResult(
+        candidates=(candidate,),
+        windows=(CorpusWindow("2026-01-01", "2026-01-31", 1),),
+    )
+    seen = {}
+
+    class _FakeDiscovery:
+        def __init__(self, **_kwargs):
+            pass
+
+        def discover_corpus(self, **_kwargs):
+            return scanned
+
+        def enrich_corpus_priority(self, result, *, year, limit=None):
+            return result
+
+    class _FakeBridge:
+        def acquire_candidates(self, received, *, refresh_recent_days):
+            seen["refresh_recent_days"] = refresh_recent_days
+            received = tuple(received)
+            from chessgrandmaster.discovery.acquire import DiscoveryAcquisitionResult
+
+            return DiscoveryAcquisitionResult(
+                discovered=len(received),
+                attempted=len(received),
+                acquired=0,
+                skipped_existing=len(received),
+                skipped_no_pgn=0,
+                failed=0,
+                results=(),
+            )
+
+    monkeypatch.setattr(cli, "ChessResultsDiscovery", _FakeDiscovery)
+    monkeypatch.setattr(cli, "_build_acquisition_service", lambda *_args: _FakeBridge())
+
+    assert cli.main(
+        [
+            "chess-results",
+            "corpus",
+            "--acquire",
+            "--refresh-recent-days",
+            "0",
+            "--registry",
+            str(tmp_path / "registry.sqlite"),
+            "--root",
+            str(tmp_path / "b2"),
+        ]
+    ) == 0
+    json.loads(capsys.readouterr().out)
+    assert seen["refresh_recent_days"] == 0
 
 
 def test_corpus_acquire_fails_closed_before_constructing_b2_when_scan_is_incomplete(
