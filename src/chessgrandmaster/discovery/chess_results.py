@@ -156,11 +156,16 @@ class CorpusDiscoveryResult:
     candidates: tuple[ChessResultsCandidate, ...]
     windows: tuple[CorpusWindow, ...]
     errors: tuple[str, ...] = ()
+    priority_errors: tuple[str, ...] = ()
 
     @property
     def complete(self) -> bool:
         """Whether every requested source window completed without saturation."""
         return not self.errors and not self.saturated_windows
+
+    @property
+    def priority_complete(self) -> bool:
+        return not self.priority_errors
 
     @property
     def saturated_windows(self) -> tuple[CorpusWindow, ...]:
@@ -178,9 +183,11 @@ class CorpusDiscoveryResult:
             "candidates": [candidate.to_dict() for candidate in self.candidates],
             "windows": [window.to_dict() for window in self.windows],
             "errors": list(self.errors),
+            "priority_errors": list(self.priority_errors),
             "candidate_count": len(self.candidates),
             "priority_counts": self.priority_counts,
             "complete": self.complete,
+            "priority_complete": self.priority_complete,
         }
 
 
@@ -1778,7 +1785,7 @@ class ChessResultsDiscovery:
             from_date = f"{year:04d}-01-01"
             to_date = f"{year:04d}-12-31"
             discovered: list[DiscoveryResult] = []
-            errors = list(result.errors)
+            priority_errors = list(result.priority_errors)
             for lane, discover in (
                 (
                     "overseas-vie",
@@ -1798,17 +1805,19 @@ class ChessResultsDiscovery:
                 try:
                     lane_result = discover()
                 except Exception as exc:
-                    errors.append(
+                    priority_errors.append(
                         f"priority:{lane}:{type(exc).__name__}:{exc}"
                     )
                     continue
                 discovered.append(lane_result)
-                errors.extend(f"priority:{lane}:{error}" for error in lane_result.errors)
+                priority_errors.extend(
+                    f"priority:{lane}:{error}" for error in lane_result.errors
+                )
             priority_results = tuple(discovered)
         else:
-            errors = list(result.errors)
+            priority_errors = list(result.priority_errors)
             for index, lane_result in enumerate(priority_results):
-                errors.extend(
+                priority_errors.extend(
                     f"priority:{index}:{error}" for error in lane_result.errors
                 )
         return CorpusDiscoveryResult(
@@ -1818,7 +1827,8 @@ class ChessResultsDiscovery:
                 limit=limit,
             ),
             windows=result.windows,
-            errors=tuple(errors),
+            errors=result.errors,
+            priority_errors=tuple(priority_errors),
         )
 
     def _player_search_url(self) -> str:

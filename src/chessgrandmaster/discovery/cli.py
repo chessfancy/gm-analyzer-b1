@@ -206,6 +206,8 @@ def _success_payload(
     }
     if isinstance(result, CorpusDiscoveryResult):
         payload["complete"] = result.complete
+        payload["priority_complete"] = result.priority_complete
+        payload["priority_errors"] = list(result.priority_errors)
         payload["windows"] = [window.to_dict() for window in result.windows]
         payload["priority_counts"] = {
             "book_high": result.priority_counts["BOOK_HIGH"],
@@ -227,6 +229,9 @@ def _corpus_incomplete_payload(
         "ok": False,
         "provider": provider,
         "mode": mode,
+        "complete": result.complete,
+        "priority_complete": result.priority_complete,
+        "priority_errors": list(result.priority_errors),
         "error": {
             "type": "CorpusIncompleteError",
             "message": "corpus discovery is incomplete",
@@ -301,6 +306,8 @@ def _corpus_report(
         "country": country,
         "refresh_recent_days": refresh_recent_days,
         "complete": result.complete,
+        "priority_complete": result.priority_complete,
+        "priority_errors": list(result.priority_errors),
         "windows": [window.to_dict() for window in result.windows],
         "saturated_windows": [
             window.to_dict() for window in result.saturated_windows
@@ -436,6 +443,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     candidates=tuple(candidates),
                     windows=scanned.windows,
                     errors=scanned.errors,
+                    priority_errors=scanned.priority_errors,
                 )
         elif args.mode == "federation":
             result = service.discover_federation(args.federation, limit=args.limit)

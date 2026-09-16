@@ -243,6 +243,106 @@ def test_corpus_acquire_routes_every_post_priority_candidate_to_existing_bridge(
     assert seen["refresh_recent_days"] == 60
 
 
+def test_corpus_acquire_does_not_block_on_priority_enrichment_error(
+    monkeypatch,
+    capsys,
+    tmp_path,
+):
+    from chessgrandmaster.discovery import cli
+    from chessgrandmaster.discovery.acquire import (
+        CandidateAcquisition,
+        DiscoveryAcquisitionResult,
+    )
+
+    candidates = tuple(_candidate(f"tnr{index}", "GER") for index in range(1, 4))
+    scanned = CorpusDiscoveryResult(
+        candidates=candidates,
+        windows=(CorpusWindow("2026-01-01", "2026-01-31", 3),),
+    )
+    seen = {}
+
+    class _FakeDiscovery:
+        def __init__(self, **_kwargs):
+            pass
+
+        def discover_corpus(self, **_kwargs):
+            return scanned
+
+        def enrich_corpus_priority(self, result, *, year, limit=None):
+            seen["enrich"] = (year, limit)
+            return CorpusDiscoveryResult(
+                candidates=result.candidates,
+                windows=result.windows,
+                errors=result.errors,
+                priority_errors=("priority:diaspora:RuntimeError:provider unavailable",),
+            )
+
+    class _FakeBridge:
+        def acquire_candidates(self, received, *, refresh_recent_days):
+            received = tuple(received)
+            seen["received"] = received
+            seen["refresh_recent_days"] = refresh_recent_days
+            return DiscoveryAcquisitionResult(
+                discovered=len(received),
+                attempted=len(received),
+                acquired=len(received),
+                skipped_existing=0,
+                skipped_no_pgn=0,
+                failed=0,
+                results=tuple(
+                    CandidateAcquisition(
+                        provider=item.provider,
+                        external_id=item.external_id,
+                        source_url=item.source_url,
+                        action="acquired",
+                        tournament_id=index,
+                        tournament_status="CANONICALIZED",
+                        raw_sha256="a" * 64,
+                        revision_id=index,
+                    )
+                    for index, item in enumerate(received, 1)
+                ),
+            )
+
+    monkeypatch.setattr(cli, "ChessResultsDiscovery", _FakeDiscovery)
+    monkeypatch.setattr(cli, "_build_acquisition_service", lambda *_args: _FakeBridge())
+    report_path = tmp_path / "reports" / "priority-degraded.json"
+
+    assert cli.main(
+        [
+            "chess-results",
+            "corpus",
+            "--acquire",
+            "--report",
+            str(report_path),
+            "--registry",
+            str(tmp_path / "registry.sqlite"),
+            "--root",
+            str(tmp_path / "b2"),
+        ]
+    ) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is True
+    assert payload["complete"] is True
+    assert payload["priority_complete"] is False
+    assert payload["priority_errors"] == [
+        "priority:diaspora:RuntimeError:provider unavailable"
+    ]
+    assert payload["acquisition"]["acquired"] == 3
+    assert [item.external_id for item in seen["received"]] == [
+        "tnr1",
+        "tnr2",
+        "tnr3",
+    ]
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["complete"] is True
+    assert report["priority_complete"] is False
+    assert report["priority_errors"] == [
+        "priority:diaspora:RuntimeError:provider unavailable"
+    ]
+
+
 def test_corpus_cli_allows_disabling_recent_refresh(monkeypatch, capsys, tmp_path):
     from chessgrandmaster.discovery import cli
 
@@ -357,6 +457,9 @@ def test_corpus_acquire_fails_closed_before_constructing_b2_when_scan_is_incompl
     assert exit_code != 0
     payload = json.loads(capsys.readouterr().out)
     assert payload == {
+        "complete": False,
+        "priority_complete": True,
+        "priority_errors": [],
         "discovery": {
             "candidate_count": 1,
             "errors": [

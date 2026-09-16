@@ -426,6 +426,28 @@ def test_corpus_result_exposes_completeness_invariant():
     assert incomplete.to_dict()["complete"] is False
 
 
+def test_priority_enrichment_errors_do_not_change_source_corpus_completeness():
+    source = CorpusDiscoveryResult(
+        candidates=(),
+        windows=(CorpusWindow("2026-01-01", "2026-01-31", 1),),
+    )
+    priority_error = DiscoveryResult(
+        candidates=(),
+        errors=("diaspora unavailable",),
+    )
+
+    enriched = ChessResultsDiscovery(opener=_CorpusOpener()).enrich_corpus_priority(
+        source,
+        year=2026,
+        priority_results=(priority_error,),
+    )
+
+    assert enriched.errors == ()
+    assert enriched.priority_errors == ("priority:0:diaspora unavailable",)
+    assert enriched.complete is True
+    assert enriched.priority_complete is False
+
+
 def test_priority_merge_keeps_every_corpus_candidate_and_preserves_foreign_event_country():
     def corpus_candidate(key: str, country: str):
         return ChessResultsCandidate(
