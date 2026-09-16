@@ -131,6 +131,7 @@ class CorpusWindow:
     returned_row_count: int
     split: bool = False
     saturated: bool = False
+    parsed_candidate_count: int = 0
 
     @property
     def source_window_saturated(self) -> bool:
@@ -141,6 +142,7 @@ class CorpusWindow:
             "from_date": self.from_date,
             "to_date": self.to_date,
             "returned_row_count": self.returned_row_count,
+            "parsed_candidate_count": self.parsed_candidate_count,
             "split": self.split,
             "saturated": self.saturated,
             "source_window_saturated": self.source_window_saturated,
@@ -154,6 +156,11 @@ class CorpusDiscoveryResult:
     candidates: tuple[ChessResultsCandidate, ...]
     windows: tuple[CorpusWindow, ...]
     errors: tuple[str, ...] = ()
+
+    @property
+    def complete(self) -> bool:
+        """Whether every requested source window completed without saturation."""
+        return not self.errors and not self.saturated_windows
 
     @property
     def saturated_windows(self) -> tuple[CorpusWindow, ...]:
@@ -173,6 +180,7 @@ class CorpusDiscoveryResult:
             "errors": list(self.errors),
             "candidate_count": len(self.candidates),
             "priority_counts": self.priority_counts,
+            "complete": self.complete,
         }
 
 
@@ -187,6 +195,8 @@ class _Link:
 class _TableRow:
     cells: tuple[str, ...]
     links: tuple[_Link, ...]
+    table_id: int = 0
+    header: bool = False
 
 
 @dataclass(frozen=True)
@@ -279,10 +289,14 @@ class _DiscoveryParser(HTMLParser):
         self._capture_stack: list[_OpenCapture] = []
         self._row_cells: list[str] | None = None
         self._row_links: list[_Link] = []
+        self._row_table_id = 0
+        self._row_header = False
         self._cell_parts: list[str] | None = None
         self._anchor: tuple[str, list[str], str] | None = None
         self._context_stack: list[tuple[str, str]] = []
         self._ignored_depth = 0
+        self._table_stack: list[int] = []
+        self._next_table_id = 0
 
     @staticmethod
     def _text(parts: list[str]) -> str:
@@ -441,6 +455,9 @@ class _DiscoveryParser(HTMLParser):
             classes = attr_map.get("class", "").casefold()
             if tag == "label" or "label" in classes or "lb_" in key.casefold():
                 self._capture_stack.append(_OpenCapture(tag, key))
+        if tag == "table":
+            self._next_table_id += 1
+            self._table_stack.append(self._next_table_id)
         if tag == "form":
             self._finish_form()
             self._form = _FormBuilder(
@@ -486,7 +503,11 @@ class _DiscoveryParser(HTMLParser):
         if tag == "tr":
             self._row_cells = []
             self._row_links = []
+            self._row_table_id = self._table_stack[-1] if self._table_stack else 0
+            self._row_header = False
         elif tag in {"td", "th"} and self._row_cells is not None:
+            if tag == "th":
+                self._row_header = True
             self._cell_parts = []
         elif tag == "a":
             href = attr_map.get("href", "")
@@ -519,11 +540,20 @@ class _DiscoveryParser(HTMLParser):
             self._row_cells.append(self._text(self._cell_parts or []))
             self._cell_parts = None
         elif tag == "tr" and self._row_cells is not None:
-            self.rows.append(_TableRow(tuple(self._row_cells), tuple(self._row_links)))
+            self.rows.append(
+                _TableRow(
+                    tuple(self._row_cells),
+                    tuple(self._row_links),
+                    table_id=self._row_table_id,
+                    header=self._row_header,
+                )
+            )
             self._row_cells = None
             self._row_links = []
         elif tag == "form":
             self._finish_form()
+        elif tag == "table" and self._table_stack:
+            self._table_stack.pop()
         for index in range(len(self._capture_stack) - 1, -1, -1):
             capture = self._capture_stack[index]
             if capture.tag != tag:
@@ -555,7 +585,14 @@ class _DiscoveryParser(HTMLParser):
         if self._row_cells is not None:
             if self._cell_parts is not None:
                 self._row_cells.append(self._text(self._cell_parts))
-            self.rows.append(_TableRow(tuple(self._row_cells), tuple(self._row_links)))
+            self.rows.append(
+                _TableRow(
+                    tuple(self._row_cells),
+                    tuple(self._row_links),
+                    table_id=self._row_table_id,
+                    header=self._row_header,
+                )
+            )
             self._row_cells = None
             self._row_links = []
         if self._anchor is not None:
@@ -1322,7 +1359,7 @@ def _corpus_candidates(
     year: int,
     window_from: str,
     window_to: str,
-) -> list[ChessResultsCandidate]:
+) -> tuple[list[ChessResultsCandidate], int]:
     header_index = next(
         (
             index
@@ -1339,10 +1376,24 @@ def _corpus_candidates(
         None,
     )
     if header_index is None:
-        return []
+        page_text = " ".join(
+            cell for row in parser.rows for cell in row.cells
+        ).casefold()
+        if "no tournament was found with this selection" in page_text:
+            return [], 0
+        raise RuntimeError(
+            "Chess-Results Tournament Database result table is missing"
+        )
     indices = _corpus_header_indices(parser.rows[header_index])
+    header_row = parser.rows[header_index]
+    data_rows = [
+        row
+        for row in parser.rows[header_index + 1 :]
+        if row.table_id == header_row.table_id and not row.header
+    ]
+    provider_result_row_count = len(data_rows)
     candidates: list[ChessResultsCandidate] = []
-    for row in parser.rows[header_index + 1 :]:
+    for row in data_rows:
         required_indices = [
             indices["title"],
             indices["event_country"],
@@ -1405,7 +1456,7 @@ def _corpus_candidates(
                 provider_game_count=game_count,
             )
         )
-    return candidates
+    return candidates, provider_result_row_count
 
 
 def _calendar_windows(year: int) -> tuple[tuple[str, str], ...]:
@@ -1562,7 +1613,7 @@ class ChessResultsDiscovery:
         to_date: str,
         max_lines: int,
         country: str | None,
-    ) -> tuple[list[ChessResultsCandidate], int]:
+    ) -> tuple[list[ChessResultsCandidate], int, int]:
         entry_page_url, entry_body = self._fetch(self._corpus_search_url())
         entry = _parse_discovery_page(entry_body)
         form, controls, values = _corpus_form(
@@ -1591,14 +1642,14 @@ class ChessResultsDiscovery:
             method=method,
             data=data,
         )
-        candidates = _corpus_candidates(
+        candidates, provider_result_row_count = _corpus_candidates(
             result_page_url,
             _parse_discovery_page(result_body),
             year=year,
             window_from=from_date,
             window_to=to_date,
         )
-        return candidates, len(candidates)
+        return candidates, provider_result_row_count, len(candidates)
 
     def _scan_corpus_window(
         self,
@@ -1609,24 +1660,32 @@ class ChessResultsDiscovery:
         max_lines: int,
         country: str | None,
     ) -> tuple[list[ChessResultsCandidate], list[CorpusWindow]]:
-        candidates, returned_count = self._query_corpus_window(
+        candidates, provider_result_row_count, parsed_candidate_count = (
+            self._query_corpus_window(
             year=year,
             from_date=from_date,
             to_date=to_date,
             max_lines=max_lines,
             country=country,
+            )
         )
-        if returned_count < max_lines:
+        if provider_result_row_count < max_lines:
             return candidates, [
-                CorpusWindow(from_date, to_date, returned_count)
+                CorpusWindow(
+                    from_date,
+                    to_date,
+                    provider_result_row_count,
+                    parsed_candidate_count=parsed_candidate_count,
+                )
             ]
         if from_date == to_date:
             return candidates, [
                 CorpusWindow(
                     from_date,
                     to_date,
-                    returned_count,
+                    provider_result_row_count,
                     saturated=True,
+                    parsed_candidate_count=parsed_candidate_count,
                 )
             ]
         left, right = _split_date_window(from_date, to_date)
@@ -1650,8 +1709,9 @@ class ChessResultsDiscovery:
                 CorpusWindow(
                     from_date,
                     to_date,
-                    returned_count,
+                    provider_result_row_count,
                     split=True,
+                    parsed_candidate_count=parsed_candidate_count,
                 ),
                 *left_windows,
                 *right_windows,

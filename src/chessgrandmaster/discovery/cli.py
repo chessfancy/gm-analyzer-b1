@@ -187,6 +187,7 @@ def _success_payload(
         "errors": list(result.errors),
     }
     if isinstance(result, CorpusDiscoveryResult):
+        payload["complete"] = result.complete
         payload["windows"] = [window.to_dict() for window in result.windows]
         payload["priority_counts"] = {
             "book_high": result.priority_counts["BOOK_HIGH"],
@@ -197,6 +198,29 @@ def _success_payload(
         payload["ok"] = acquisition.failed == 0
         payload["acquisition"] = acquisition.to_dict()
     return payload
+
+
+def _corpus_incomplete_payload(
+    provider: str,
+    mode: str,
+    result: CorpusDiscoveryResult,
+) -> dict[str, object]:
+    return {
+        "ok": False,
+        "provider": provider,
+        "mode": mode,
+        "error": {
+            "type": "CorpusIncompleteError",
+            "message": "corpus discovery is incomplete",
+        },
+        "discovery": {
+            "candidate_count": len(result.candidates),
+            "errors": list(result.errors),
+            "saturated_windows": [
+                window.to_dict() for window in result.saturated_windows
+            ],
+        },
+    }
 
 
 def _corpus_report(
@@ -249,6 +273,7 @@ def _corpus_report(
         "games_available": True,
         "max_lines": max_lines,
         "country": country,
+        "complete": result.complete,
         "windows": [window.to_dict() for window in result.windows],
         "saturated_windows": [
             window.to_dict() for window in result.saturated_windows
@@ -366,11 +391,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 country=getattr(args, "country", None),
             )
             if args.mode == "corpus":
-                result = service.enrich_corpus_priority(
-                    scanned,
-                    year=args.year,
-                    limit=args.limit,
-                )
+                if args.acquire and not scanned.complete:
+                    result = scanned
+                else:
+                    result = service.enrich_corpus_priority(
+                        scanned,
+                        year=args.year,
+                        limit=args.limit,
+                    )
             else:
                 candidates = scanned.candidates
                 if args.limit is not None:
@@ -427,6 +455,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 2
         _emit(_success_payload(args.provider, args.mode, result))
         return 0
+
+    if args.mode == "corpus" and not result.complete:
+        if getattr(args, "report", None):
+            try:
+                _write_corpus_report(
+                    args.report,
+                    result,
+                    year=args.year,
+                    max_lines=args.max_lines,
+                    country=getattr(args, "country", None),
+                    acquisition=None,
+                )
+            except Exception as exc:
+                _emit(_error_payload(args.provider, args.mode, exc))
+                return 2
+        _emit(_corpus_incomplete_payload(args.provider, args.mode, result))
+        return 2
 
     try:
         acquisition_service = _build_acquisition_service(

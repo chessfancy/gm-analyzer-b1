@@ -85,6 +85,7 @@ def test_corpus_cli_scans_full_set_before_limit_and_writes_deterministic_report(
     assert payload["ok"] is True
     assert payload["mode"] == "corpus"
     assert payload["candidate_count"] == 1
+    assert payload["complete"] is True
     assert seen["scan"] == {
         "year": 2026,
         "max_lines": 2000,
@@ -98,6 +99,7 @@ def test_corpus_cli_scans_full_set_before_limit_and_writes_deterministic_report(
     assert report["max_lines"] == 2000
     assert report["only_finished"] is True
     assert report["games_available"] is True
+    assert report["complete"] is True
     assert report["candidate_count"] == 1
     assert report["priority_counts"] == {
         "book_high": 0,
@@ -233,3 +235,90 @@ def test_corpus_acquire_routes_every_post_priority_candidate_to_existing_bridge(
     ]
     assert seen["scan"]["limit"] is None
     assert seen["enrich"] == (2026, None)
+
+
+def test_corpus_acquire_fails_closed_before_constructing_b2_when_scan_is_incomplete(
+    monkeypatch,
+    capsys,
+    tmp_path,
+):
+    from chessgrandmaster.discovery import cli
+
+    candidate = _candidate("tnr4001", "GER")
+    incomplete = CorpusDiscoveryResult(
+        candidates=(candidate,),
+        windows=(
+            CorpusWindow(
+                "2026-01-01",
+                "2026-01-01",
+                2000,
+                saturated=True,
+            ),
+        ),
+        errors=("source_window:2026-02-01:2026-02-28:RuntimeError:HTTP error",),
+    )
+    seen = {"enriched": False, "built": False}
+
+    class _FakeDiscovery:
+        def __init__(self, **_kwargs):
+            pass
+
+        def discover_corpus(self, **kwargs):
+            return incomplete
+
+        def enrich_corpus_priority(self, *args, **kwargs):
+            seen["enriched"] = True
+            raise AssertionError("incomplete corpus must not be enriched")
+
+    def _unexpected_build(*_args):
+        seen["built"] = True
+        raise AssertionError("B2 must not be constructed for incomplete corpus")
+
+    monkeypatch.setattr(cli, "ChessResultsDiscovery", _FakeDiscovery)
+    monkeypatch.setattr(cli, "_build_acquisition_service", _unexpected_build)
+
+    report_path = tmp_path / "reports" / "incomplete.json"
+    exit_code = cli.main(
+        [
+            "chess-results",
+            "corpus",
+            "--acquire",
+            "--registry",
+            str(tmp_path / "registry.sqlite"),
+            "--root",
+            str(tmp_path / "b2"),
+            "--report",
+            str(report_path),
+        ]
+    )
+
+    assert exit_code != 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "discovery": {
+            "candidate_count": 1,
+            "errors": [
+                "source_window:2026-02-01:2026-02-28:RuntimeError:HTTP error"
+            ],
+            "saturated_windows": [
+                {
+                    "from_date": "2026-01-01",
+                    "parsed_candidate_count": 0,
+                    "returned_row_count": 2000,
+                    "saturated": True,
+                    "source_window_saturated": True,
+                    "split": False,
+                    "to_date": "2026-01-01",
+                }
+            ],
+        },
+        "error": {
+            "message": "corpus discovery is incomplete",
+            "type": "CorpusIncompleteError",
+        },
+        "mode": "corpus",
+        "ok": False,
+        "provider": "chess-results",
+    }
+    assert json.loads(report_path.read_text(encoding="utf-8"))["complete"] is False
+    assert seen == {"enriched": False, "built": False}

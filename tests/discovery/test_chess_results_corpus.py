@@ -5,8 +5,11 @@ from urllib.parse import parse_qs
 from chessgrandmaster.discovery.chess_results import (
     ChessResultsCandidate,
     ChessResultsDiscovery,
+    CorpusDiscoveryResult,
+    CorpusWindow,
     DiscoveryResult,
     PlayerEvidence,
+    _corpus_candidates,
     _find_player_form,
     _parse_discovery_page,
     merge_corpus_priority,
@@ -89,6 +92,14 @@ CORPUS_RESULT_HTML = """
 """
 
 
+EMPTY_CORPUS_RESULT_HTML = """
+<html><body>
+  <table><tr><td>navigation</td></tr></table>
+  <table><tr><td>No tournament was found with this selection.</td></tr></table>
+</body></html>
+"""
+
+
 PLAYER_FORM_WITH_FIDE_SORT_HTML = """
 <html><body>
   <form action="/player-search" method="post">
@@ -111,6 +122,19 @@ def test_player_form_ignores_fide_id_sort_option_when_finding_input():
     assert form.method == "POST"
     assert fide_control.name == "opaque-fide-input"
     assert submit.name == "opaque-submit"
+
+
+def test_empty_provider_result_marker_counts_as_zero_rows():
+    candidates, provider_result_row_count = _corpus_candidates(
+        "https://chess-results.com/TurnierSuche.aspx?lan=1",
+        _parse_discovery_page(EMPTY_CORPUS_RESULT_HTML.encode("utf-8")),
+        year=2026,
+        window_from="2026-10-01",
+        window_to="2026-10-31",
+    )
+
+    assert candidates == []
+    assert provider_result_row_count == 0
 
 
 class _Response:
@@ -197,7 +221,8 @@ def test_corpus_year_partition_has_all_calendar_months_and_leap_safe_boundaries(
         ("2026-11-01", "2026-11-30"),
         ("2026-12-01", "2026-12-31"),
     ]
-    assert all(window.returned_row_count == 2 for window in result.windows)
+    assert all(window.returned_row_count == 4 for window in result.windows)
+    assert all(window.parsed_candidate_count == 2 for window in result.windows)
 
 
 def _result_for_rows(rows: list[tuple[str, str, str, str, str, int, str]]) -> str:
@@ -278,6 +303,7 @@ def test_saturated_month_splits_and_dedupes_children_without_using_limit_as_scan
         2000,
         split=True,
         saturated=False,
+        parsed_candidate_count=2000,
     )
     assert {(window.from_date, window.to_date, window.returned_row_count) for window in january[1:]} == {
         ("2026-01-01", "2026-01-16", 1200),
@@ -305,6 +331,99 @@ def test_recursive_saturation_reaches_one_day_and_reports_structured_warning():
     assert all(window.from_date == window.to_date for window in result.saturated_windows)
     assert all(window.returned_row_count == 2000 for window in result.saturated_windows)
     assert all(window.saturated is True for window in result.saturated_windows)
+
+
+def test_provider_row_count_drives_saturation_when_one_of_2000_rows_is_malformed():
+    rows = [_window_row(400000 + index) for index in range(1999)]
+    rows.append(
+        (
+            "Malformed tournament row",
+            "GER",
+            "not-a-date",
+            "not-a-date",
+            "90 min + 30 sec",
+            1,
+            "not-a-database-key",
+        )
+    )
+
+    def rows_for_window(from_date: str, to_date: str):
+        if (from_date, to_date) == ("2026-01-01", "2026-01-31"):
+            return rows
+        return []
+
+    result = ChessResultsDiscovery(opener=_WindowOpener(rows_for_window)).discover_corpus(
+        year=2026,
+        max_lines=2000,
+    )
+
+    january = [
+        window for window in result.windows if window.from_date.startswith("2026-01")
+    ]
+    assert january[0].returned_row_count == 2000
+    assert january[0].parsed_candidate_count == 1999
+    assert january[0].split is True
+    assert ("2026-01-01", "2026-01-16") in {
+        (window.from_date, window.to_date) for window in january[1:]
+    }
+
+
+def test_provider_row_count_below_max_does_not_split_when_some_rows_are_malformed():
+    rows = [_window_row(500000 + index) for index in range(1990)]
+    rows.extend(
+        (
+            "Malformed tournament row",
+            "GER",
+            "not-a-date",
+            "not-a-date",
+            "90 min + 30 sec",
+            1,
+            "not-a-database-key",
+        )
+        for _ in range(9)
+    )
+
+    def rows_for_window(from_date: str, to_date: str):
+        if (from_date, to_date) == ("2026-01-01", "2026-01-31"):
+            return rows
+        return []
+
+    result = ChessResultsDiscovery(opener=_WindowOpener(rows_for_window)).discover_corpus(
+        year=2026,
+        max_lines=2000,
+    )
+
+    january = [
+        window for window in result.windows if window.from_date.startswith("2026-01")
+    ]
+    assert january[0].returned_row_count == 1999
+    assert january[0].parsed_candidate_count == 1990
+    assert january[0].split is False
+    assert len(january) == 1
+
+
+def test_corpus_result_exposes_completeness_invariant():
+    complete = CorpusDiscoveryResult(
+        candidates=(),
+        windows=(CorpusWindow("2026-01-01", "2026-01-31", 1),),
+    )
+    incomplete = CorpusDiscoveryResult(
+        candidates=(),
+        windows=(
+            CorpusWindow(
+                "2026-01-01",
+                "2026-01-01",
+                2000,
+                saturated=True,
+            ),
+        ),
+        errors=("source_window:error",),
+    )
+
+    assert complete.complete is True
+    assert complete.to_dict()["complete"] is True
+    assert incomplete.complete is False
+    assert incomplete.to_dict()["complete"] is False
 
 
 def test_priority_merge_keeps_every_corpus_candidate_and_preserves_foreign_event_country():
