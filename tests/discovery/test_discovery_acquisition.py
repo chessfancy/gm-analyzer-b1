@@ -146,6 +146,147 @@ def test_new_candidate_is_acquired_and_returns_structured_result(tmp_path):
     assert batch.results[0].error_message is None
 
 
+def test_fetch_candidate_returns_raw_provenance_without_revision(tmp_path):
+    registry = Registry(tmp_path / "registry.sqlite")
+    candidate = _candidate()
+
+    class _FetchAcquisition(_FakeAcquisition):
+        def fetch(self, source_url: str):
+            self.calls.append(source_url)
+            return self.outcomes[source_url]
+
+    acquisition = _FetchAcquisition(
+        {
+            candidate.source_url: SimpleNamespace(
+                tournament_id=17,
+                tournament_status="DOWNLOADED",
+                source_file_id=31,
+                raw_sha256="a" * 64,
+                raw_object_key="tournaments/17/source/chess-results/a/original.pgn",
+                download_attempt_id=41,
+                revision_id=None,
+            )
+        }
+    )
+    service = DiscoveryAcquisitionService(registry, acquisition, _available_probe)
+
+    batch = service.fetch_candidates([candidate])
+
+    assert acquisition.calls == [candidate.source_url]
+    assert batch.fetched == 1
+    assert batch.failed == 0
+    assert batch.results[0].action == "fetched"
+    assert batch.results[0].tournament_status == "DOWNLOADED"
+    assert batch.results[0].source_file_id == 31
+    assert batch.results[0].raw_sha256 == "a" * 64
+    assert batch.results[0].revision_id is None
+
+
+def test_fetch_completed_candidate_with_refresh_disabled_is_not_retried(tmp_path):
+    registry = Registry(tmp_path / "registry.sqlite")
+    candidate = _candidate()
+    tournament_id = _register_candidate(registry, candidate, "CANONICALIZED")
+    acquisition = _FakeAcquisition({})
+    probe = _FakePgnProbe({})
+
+    batch = DiscoveryAcquisitionService(registry, acquisition, probe).fetch_candidates(
+        [candidate],
+        refresh_recent_days=0,
+    )
+
+    assert batch.fetched == 0
+    assert batch.skipped_existing == 1
+    assert batch.results[0].action == "skipped_existing"
+    assert batch.results[0].tournament_id == tournament_id
+    assert acquisition.calls == []
+    assert probe.calls == []
+
+
+def test_fetch_unavailable_candidate_does_not_call_download(tmp_path):
+    registry = Registry(tmp_path / "registry.sqlite")
+    candidate = _candidate()
+
+    class _FetchAcquisition(_FakeAcquisition):
+        def fetch(self, source_url: str):
+            self.calls.append(source_url)
+            return self.outcomes[source_url]
+
+    acquisition = _FetchAcquisition({})
+    probe = _FakePgnProbe(
+        {
+            candidate.source_url: SimpleNamespace(
+                available=False,
+                database_key="1450909",
+                round_count=0,
+                game_count=0,
+                reason="no_game_database",
+            )
+        }
+    )
+
+    batch = DiscoveryAcquisitionService(registry, acquisition, probe).fetch_candidates(
+        [candidate]
+    )
+
+    assert batch.fetched == 0
+    assert batch.skipped_no_pgn == 1
+    assert batch.results[0].action == "skipped_no_pgn"
+    assert acquisition.calls == []
+    assert registry.registry_counts()["source_files"] == 0
+
+
+def test_fetch_failure_isolated_and_later_candidate_continues(tmp_path):
+    registry = Registry(tmp_path / "registry.sqlite")
+    candidates = [
+        _candidate("tnr1450909"),
+        _candidate("tnr1450910"),
+        _candidate("tnr1450911"),
+    ]
+
+    class _FetchAcquisition(_FakeAcquisition):
+        def fetch(self, source_url: str):
+            self.calls.append(source_url)
+            outcome = self.outcomes[source_url]
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+
+    acquisition = _FetchAcquisition(
+        {
+            candidates[0].source_url: SimpleNamespace(
+                tournament_id=1,
+                tournament_status="DOWNLOADED",
+                source_file_id=11,
+                raw_sha256="a" * 64,
+            ),
+            candidates[1].source_url: RuntimeError("raw download failed"),
+            candidates[2].source_url: SimpleNamespace(
+                tournament_id=3,
+                tournament_status="DOWNLOADED",
+                source_file_id=33,
+                raw_sha256="c" * 64,
+            ),
+        }
+    )
+
+    batch = DiscoveryAcquisitionService(
+        registry,
+        acquisition,
+        _available_probe,
+    ).fetch_candidates(candidates)
+
+    assert batch.fetched == 2
+    assert batch.failed == 1
+    assert [result.action for result in batch.results] == [
+        "fetched",
+        "failed",
+        "fetched",
+    ]
+    assert batch.results[1].error_type == "RuntimeError"
+    assert "raw download failed" in (batch.results[1].error_message or "")
+    assert acquisition.calls == [candidate.source_url for candidate in candidates]
+
+
 @pytest.mark.parametrize("status", ["CANONICALIZED", "SHARDED", "READY"])
 def test_completed_candidate_is_skipped_without_acquisition(tmp_path, status):
     registry = Registry(tmp_path / "registry.sqlite")

@@ -45,6 +45,9 @@ class CandidateAcquisition:
     error_type: str | None = None
     error_message: str | None = None
     previous_raw_sha256: str | None = None
+    source_file_id: int | None = None
+    raw_object_key: str | None = None
+    download_attempt_id: int | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -59,6 +62,9 @@ class CandidateAcquisition:
             "previous_raw_sha256": self.previous_raw_sha256,
             "error_type": self.error_type,
             "error_message": self.error_message,
+            "source_file_id": self.source_file_id,
+            "raw_object_key": self.raw_object_key,
+            "download_attempt_id": self.download_attempt_id,
         }
 
 
@@ -76,6 +82,15 @@ class DiscoveryAcquisitionResult:
     refreshed_unchanged: int = 0
     refreshed_changed: int = 0
     refresh_unavailable: int = 0
+
+    @property
+    def fetched(self) -> int:
+        """Count raw-only fetch successes, including recent refreshes."""
+        return sum(
+            result.action
+            in {"fetched", "refreshed_unchanged", "refreshed_changed"}
+            for result in self.results
+        )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -188,6 +203,17 @@ class DiscoveryAcquisitionService:
                 getattr(acquisition_result, "revision_id", None)
             ),
             previous_raw_sha256=previous_raw_sha256,
+            source_file_id=_optional_int(
+                getattr(acquisition_result, "source_file_id", None)
+            ),
+            raw_object_key=(
+                None
+                if getattr(acquisition_result, "raw_object_key", None) is None
+                else str(acquisition_result.raw_object_key)
+            ),
+            download_attempt_id=_optional_int(
+                getattr(acquisition_result, "download_attempt_id", None)
+            ),
         )
 
     @staticmethod
@@ -254,12 +280,13 @@ class DiscoveryAcquisitionService:
             previous_raw_sha256=previous_raw_sha256,
         )
 
-    def acquire_candidates(
+    def _process_candidates(
         self,
         candidates: Sequence[ChessResultsCandidate],
         *,
         refresh_recent_days: int = 0,
         as_of: date | None = None,
+        fetch_only: bool = False,
     ) -> DiscoveryAcquisitionResult:
         """Process unique candidates without allowing one failure to abort the batch."""
         if isinstance(refresh_recent_days, bool) or not isinstance(
@@ -273,6 +300,17 @@ class DiscoveryAcquisitionService:
         refresh_as_of = as_of or date.today()
         unique_candidates = self._unique_candidates(candidates)
         results: list[CandidateAcquisition] = []
+        completed_statuses = (
+            _COMPLETED_STATUSES | {"DOWNLOADED", "VALIDATED"}
+            if fetch_only
+            else _COMPLETED_STATUSES
+        )
+        operation = (
+            getattr(self.acquisition, "fetch", None)
+            if fetch_only
+            else self.acquisition.acquire
+        )
+        success_action = "fetched" if fetch_only else "acquired"
 
         for candidate in unique_candidates:
             existing: dict[str, object] | None = None
@@ -284,7 +322,7 @@ class DiscoveryAcquisitionService:
                 )
                 if (
                     existing is not None
-                    and str(existing.get("status")) in _COMPLETED_STATUSES
+                    and str(existing.get("status")) in completed_statuses
                 ):
                     if (
                         str(existing.get("status")) == "CANONICALIZED"
@@ -314,9 +352,7 @@ class DiscoveryAcquisitionService:
                                 )
                             )
                             continue
-                        acquisition_result = self.acquisition.acquire(
-                            candidate.source_url
-                        )
+                        acquisition_result = operation(candidate.source_url)
                         raw_sha256 = getattr(acquisition_result, "raw_sha256", None)
                         raw_sha256 = (
                             None if raw_sha256 is None else str(raw_sha256)
@@ -344,7 +380,7 @@ class DiscoveryAcquisitionService:
                 if not available:
                     results.append(self._no_pgn_result(candidate))
                     continue
-                acquisition_result = self.acquisition.acquire(candidate.source_url)
+                acquisition_result = operation(candidate.source_url)
             except Exception as exc:
                 results.append(
                     self._failed_result(
@@ -355,9 +391,23 @@ class DiscoveryAcquisitionService:
                     )
                 )
                 continue
-            results.append(self._acquired_result(candidate, acquisition_result))
+            results.append(
+                self._acquired_result(
+                    candidate,
+                    acquisition_result,
+                    action=success_action,
+                )
+            )
 
-        acquired = sum(result.action == "acquired" for result in results)
+        acquired = (
+            sum(
+                result.action
+                in {"fetched", "refreshed_unchanged", "refreshed_changed"}
+                for result in results
+            )
+            if fetch_only
+            else sum(result.action == "acquired" for result in results)
+        )
         skipped_existing = sum(
             result.action == "skipped_existing" for result in results
         )
@@ -385,6 +435,36 @@ class DiscoveryAcquisitionService:
             refreshed_unchanged=refreshed_unchanged,
             refreshed_changed=refreshed_changed,
             refresh_unavailable=refresh_unavailable,
+        )
+
+    def acquire_candidates(
+        self,
+        candidates: Sequence[ChessResultsCandidate],
+        *,
+        refresh_recent_days: int = 0,
+        as_of: date | None = None,
+    ) -> DiscoveryAcquisitionResult:
+        """Process candidates through full B2a validation/canonicalization."""
+        return self._process_candidates(
+            candidates,
+            refresh_recent_days=refresh_recent_days,
+            as_of=as_of,
+            fetch_only=False,
+        )
+
+    def fetch_candidates(
+        self,
+        candidates: Sequence[ChessResultsCandidate],
+        *,
+        refresh_recent_days: int = 0,
+        as_of: date | None = None,
+    ) -> DiscoveryAcquisitionResult:
+        """Fetch raw PGNs and provenance without parsing or canonicalizing games."""
+        return self._process_candidates(
+            candidates,
+            refresh_recent_days=refresh_recent_days,
+            as_of=as_of,
+            fetch_only=True,
         )
 
 

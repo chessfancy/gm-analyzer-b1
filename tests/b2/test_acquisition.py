@@ -572,3 +572,76 @@ def test_recent_refresh_raw_change_can_reuse_canonical_revision(tmp_path):
     assert registry.registry_counts()["source_files"] == 2
     assert registry.registry_counts()["tournament_revisions"] == 1
     assert second.results[0].revision_id == first.results[0].revision_id
+
+
+def test_fetch_only_registers_raw_source_without_validation_or_canonicalization(
+    tmp_path,
+    monkeypatch,
+):
+    from chessgrandmaster.b2 import acquisition as acquisition_module
+
+    service, registry, store, _ = _service(tmp_path)
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("fetch-only acquisition must not parse or canonicalize")
+
+    monkeypatch.setattr(acquisition_module, "_validation_summary", unexpected)
+    monkeypatch.setattr(acquisition_module, "canonicalize_source_file", unexpected)
+    monkeypatch.setattr(acquisition_module, "identify_game", unexpected)
+
+    result = service.fetch("tnr1450909")
+
+    assert result.tournament_status == "DOWNLOADED"
+    assert result.source_file_id > 0
+    assert result.raw_sha256 in result.raw_object_key
+    assert store.stat(result.raw_object_key).sha256 == result.raw_sha256
+    assert registry.get_tournament_status(result.tournament_id) == "DOWNLOADED"
+    assert registry.registry_counts()["canonical_games"] == 0
+    assert registry.registry_counts()["game_occurrences"] == 0
+    assert registry.registry_counts()["tournament_revisions"] == 0
+
+
+def test_fetch_bridge_rerun_skips_downloaded_candidate_when_refresh_is_disabled(
+    tmp_path,
+):
+    service, registry, _store, _opener = _service(tmp_path)
+    candidate = ChessResultsCandidate(
+        provider="chess-results",
+        external_id="tnr1450909",
+        source_url=NORMALIZED_SOURCE_URL,
+        title="Fixture tournament",
+        time_control_hint="standard",
+        evidence=("fixture",),
+    )
+    adapter = service.adapters["chess-results"]
+
+    def probe(probe_candidate):
+        ref = adapter.discover(probe_candidate.source_url)[0]
+        return adapter.probe_pgn(ref)
+
+    bridge = DiscoveryAcquisitionService(registry, service, probe)
+    first = bridge.fetch_candidates([candidate], refresh_recent_days=0)
+    second = bridge.fetch_candidates([candidate], refresh_recent_days=0)
+
+    assert first.results[0].action == "fetched"
+    assert second.results[0].action == "skipped_existing"
+    assert second.results[0].tournament_status == "DOWNLOADED"
+    assert registry.registry_counts()["download_attempts"] == 1
+    assert registry.registry_counts()["source_files"] == 1
+
+
+@pytest.mark.parametrize("bad_bytes", [b"", b"<html><body>provider error</body></html>"])
+def test_fetch_rejects_empty_or_html_provider_response_without_raw_provenance(
+    tmp_path,
+    bad_bytes,
+):
+    service, registry, store, _ = _service(tmp_path, pgn_bytes=bad_bytes)
+
+    with pytest.raises(RuntimeError, match="empty|HTML|PGN"):
+        service.fetch("tnr1450909")
+
+    assert registry.registry_counts()["source_files"] == 0
+    assert registry.registry_counts()["canonical_games"] == 0
+    assert registry.registry_counts()["game_occurrences"] == 0
+    assert registry.registry_counts()["tournament_revisions"] == 0
+    assert store.list("") == []

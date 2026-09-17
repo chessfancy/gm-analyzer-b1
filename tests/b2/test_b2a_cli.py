@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 import pytest
 
-from chessgrandmaster.b2 import cli_acquire, cli_registry
+from chessgrandmaster.b2 import cli_acquire, cli_fetch, cli_registry
 from chessgrandmaster.b2.registry import Registry
 from chessgrandmaster.b2.sources.chess_results import ChessResultsAdapter
 
@@ -552,7 +552,7 @@ def test_cli_commands_do_not_invoke_b1_analysis(
 
 
 def test_b2_cli_modules_do_not_use_private_registry_sql():
-    for module in (cli_acquire, cli_registry):
+    for module in (cli_acquire, cli_fetch, cli_registry):
         source = Path(module.__file__).read_text(encoding="utf-8")
         assert "._connect(" not in source
         assert "sqlite3" not in source
@@ -567,6 +567,7 @@ def test_project_scripts_keep_existing_entry_points_and_add_b2_cli():
     assert scripts["cgm-engine"] == "chessgrandmaster.engine_manifest:main"
     assert scripts["cgm-bench"] == "chessgrandmaster.benchmark_cli:main"
     assert scripts["cgm-acquire"] == "chessgrandmaster.b2.cli_acquire:main"
+    assert scripts["cgm-fetch"] == "chessgrandmaster.b2.cli_fetch:main"
     assert scripts["cgm-registry"] == "chessgrandmaster.b2.cli_registry:main"
 
 

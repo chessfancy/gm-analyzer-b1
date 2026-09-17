@@ -7,7 +7,7 @@ import hashlib
 import io
 from pathlib import Path
 import tempfile
-from typing import Mapping
+from typing import Callable, Mapping
 from urllib.parse import urlparse, urlunparse
 
 import chess.pgn
@@ -52,6 +52,22 @@ class AcquisitionResult:
     source_game_count: int = 0
     valid_game_count: int = 0
     invalid_game_count: int = 0
+
+
+@dataclass(frozen=True)
+class FetchResult:
+    """Audit summary for one raw-only source fetch."""
+
+    source_ref: SourceRef
+    tournament_id: int
+    source_tournament_id: int
+    source_file_id: int
+    raw_object_key: str
+    raw_sha256: str
+    raw_byte_size: int
+    source_id: int = 0
+    download_attempt_id: int = 0
+    tournament_status: str = "DOWNLOADED"
 
 
 @dataclass(frozen=True)
@@ -204,8 +220,12 @@ class AcquisitionService:
         if _STATE_RANK[status] > _STATE_RANK[current]:
             self.registry.set_tournament_status(tournament_id, status)
 
-    def acquire(self, query: str) -> AcquisitionResult:
-        """Acquire one source query and return its canonical tournament revision."""
+    def _download_and_register(
+        self,
+        query: str,
+        *,
+        processor: Callable[[FetchResult, Path, bytes], object] | None = None,
+    ) -> FetchResult | object:
         provider, adapter, source_ref = self._resolve_adapter(query)
         descriptor = adapter.describe(source_ref)
         if not isinstance(descriptor, SourceDescriptor):
@@ -295,41 +315,80 @@ class AcquisitionService:
                 raise
 
             self._advance_status(tournament_id, "DOWNLOADED")
-            validation = _validation_summary(raw_bytes)
-            self._advance_status(tournament_id, "VALIDATED")
+            fetch_result = FetchResult(
+                source_ref=source_ref,
+                source_id=source_id,
+                tournament_id=tournament_id,
+                source_tournament_id=source_tournament_id,
+                source_file_id=source_file_id,
+                raw_object_key=raw_object_key,
+                raw_sha256=raw_sha256,
+                raw_byte_size=raw_byte_size,
+                download_attempt_id=download_attempt_id,
+                tournament_status=self.registry.get_tournament_status(tournament_id),
+            )
+            if processor is not None:
+                return processor(fetch_result, downloaded_path, raw_bytes)
 
-            canonical_path = self._canonical_path(tournament_id, raw_sha256)
+        return fetch_result
+
+    def fetch(self, query: str) -> FetchResult:
+        """Download and register one source without parsing or canonicalizing games."""
+        result = self._download_and_register(query)
+        assert isinstance(result, FetchResult)
+        return result
+
+    def acquire(self, query: str) -> AcquisitionResult:
+        """Acquire one source query and return its canonical tournament revision."""
+
+        def canonicalize(
+            fetch_result: FetchResult,
+            downloaded_path: Path,
+            raw_bytes: bytes,
+        ) -> AcquisitionResult:
+            validation = _validation_summary(raw_bytes)
+            self._advance_status(fetch_result.tournament_id, "VALIDATED")
+
+            canonical_path = self._canonical_path(
+                fetch_result.tournament_id,
+                fetch_result.raw_sha256,
+            )
             canonical_result: CanonicalizationResult = canonicalize_source_file(
                 self.registry,
-                tournament_id,
-                source_file_id,
+                fetch_result.tournament_id,
+                fetch_result.source_file_id,
                 downloaded_path,
                 canonical_path,
             )
-            self._advance_status(tournament_id, "CANONICALIZED")
-            final_status = self.registry.get_tournament_status(tournament_id)
+            self._advance_status(fetch_result.tournament_id, "CANONICALIZED")
+            final_status = self.registry.get_tournament_status(
+                fetch_result.tournament_id
+            )
+            return AcquisitionResult(
+                source_ref=fetch_result.source_ref,
+                source_id=fetch_result.source_id,
+                tournament_id=fetch_result.tournament_id,
+                source_tournament_id=fetch_result.source_tournament_id,
+                source_file_id=fetch_result.source_file_id,
+                raw_object_key=fetch_result.raw_object_key,
+                raw_sha256=fetch_result.raw_sha256,
+                raw_byte_size=fetch_result.raw_byte_size,
+                download_attempt_id=fetch_result.download_attempt_id,
+                revision_id=canonical_result.revision_id,
+                revision_number=canonical_result.revision_number,
+                canonical_sha256=canonical_result.canonical_sha256,
+                canonical_game_count=canonical_result.game_count,
+                canonical_ply_count=canonical_result.ply_count,
+                canonical_path=canonical_result.canonical_path,
+                tournament_status=final_status,
+                source_game_count=validation.source_game_count,
+                valid_game_count=validation.valid_game_count,
+                invalid_game_count=validation.invalid_game_count,
+            )
 
-        return AcquisitionResult(
-            source_ref=source_ref,
-            source_id=source_id,
-            tournament_id=tournament_id,
-            source_tournament_id=source_tournament_id,
-            source_file_id=source_file_id,
-            raw_object_key=raw_object_key,
-            raw_sha256=raw_sha256,
-            raw_byte_size=raw_byte_size,
-            download_attempt_id=download_attempt_id,
-            revision_id=canonical_result.revision_id,
-            revision_number=canonical_result.revision_number,
-            canonical_sha256=canonical_result.canonical_sha256,
-            canonical_game_count=canonical_result.game_count,
-            canonical_ply_count=canonical_result.ply_count,
-            canonical_path=canonical_result.canonical_path,
-            tournament_status=final_status,
-            source_game_count=validation.source_game_count,
-            valid_game_count=validation.valid_game_count,
-            invalid_game_count=validation.invalid_game_count,
-        )
+        result = self._download_and_register(query, processor=canonicalize)
+        assert isinstance(result, AcquisitionResult)
+        return result
 
 
-__all__ = ["AcquisitionResult", "AcquisitionService"]
+__all__ = ["AcquisitionResult", "AcquisitionService", "FetchResult"]
