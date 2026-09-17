@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import hashlib
 import json
 import os
 from pathlib import Path
 import time
 
+import chessgrandmaster.b2.processor as processor_module
 from chessgrandmaster.b2.canonicalize import canonicalize_source_file
 from chessgrandmaster.b2.cli_process import build_parser, main
 from chessgrandmaster.b2.processor import (
     CorpusProcessor,
     ProcessGameJob,
+    PoolStats,
+    _PoolRun,
+    _TimingBook,
     process_game_job,
     resolve_worker_count,
     segment_pgn_text,
@@ -408,3 +413,78 @@ def test_worker_policy_and_cli_report_contract(tmp_path, capsys):
     assert json.loads(report_path.read_text(encoding="utf-8")) == payload
     assert payload["timings"]["segmentation"]["count"] == 1
     assert payload["timings"]["parse"]["count"] == 1
+
+
+def test_timing_book_add_samples_uses_sample_max_without_changing_single_add():
+    timing = _TimingBook()
+
+    timing.add_samples("parse", [4.0, 5.0, 3.0])
+    timing.add("segmentation", 7.0)
+
+    assert timing.to_dict()["parse"] == {
+        "count": 3,
+        "total_ms": 12.0,
+        "max_ms": 5.0,
+    }
+    assert timing.to_dict()["segmentation"] == {
+        "count": 1,
+        "total_ms": 7.0,
+        "max_ms": 7.0,
+    }
+
+
+def test_processor_report_uses_sample_max_for_per_game_timing_batches(
+    tmp_path, monkeypatch
+):
+    registry = Registry(tmp_path / "registry.sqlite")
+    tournament_id = registry.upsert_tournament("timing", status="DOWNLOADED")
+    _seed_source(
+        tmp_path,
+        registry,
+        LocalObjectStore(tmp_path / "objects"),
+        tournament_id,
+        SINGLE_GAME + b"\n" + SINGLE_GAME + b"\n" + SINGLE_GAME,
+        "timing",
+    )
+
+    class _DeterministicPool:
+        replacements = 0
+
+        def __init__(self, workers, operation):
+            self._stats = PoolStats()
+
+        @property
+        def stats(self):
+            return self._stats
+
+        def run(self, jobs, timeout_sec):
+            results = []
+            for job, sample in zip(jobs, (4.0, 5.0, 3.0)):
+                result = process_game_job(job)
+                results.append(
+                    replace(
+                        result,
+                        queue_wait_ms=sample,
+                        parse_ms=sample,
+                        identity_ms=sample,
+                    )
+                )
+            return _PoolRun(tuple(results), 0, self._stats)
+
+        def _shutdown(self):
+            return None
+
+    monkeypatch.setattr(
+        processor_module,
+        "_PersistentWorkerPool",
+        _DeterministicPool,
+    )
+    processor, _ = _processor(tmp_path, registry)
+
+    report = processor.process()
+    source_timing = report.results[0].timing
+
+    for stage in ("queue_start_wait", "parse", "identity_replay"):
+        expected = {"count": 3, "total_ms": 12.0, "max_ms": 5.0}
+        assert source_timing[stage] == expected
+        assert report.timings[stage] == expected

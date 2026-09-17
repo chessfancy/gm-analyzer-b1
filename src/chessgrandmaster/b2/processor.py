@@ -785,24 +785,34 @@ class _TimingBook:
             stage: [0.0, 0.0, 0.0] for stage in _TIMING_STAGES
         }
 
-    def add(self, stage: str, elapsed_ms: float, count: int = 1) -> None:
+    def _merge(
+        self,
+        stage: str,
+        count: int,
+        total_ms: float,
+        max_ms: float,
+    ) -> None:
         if stage not in self.values:
             self.values[stage] = [0.0, 0.0, 0.0]
         current = self.values[stage]
         current[0] += float(count)
-        current[1] += float(elapsed_ms)
-        current[2] = max(current[2], float(elapsed_ms))
+        current[1] += float(total_ms)
+        current[2] = max(current[2], float(max_ms))
+
+    def add(self, stage: str, elapsed_ms: float, count: int = 1) -> None:
+        self._merge(stage, count, float(elapsed_ms), float(elapsed_ms))
+
+    def add_samples(self, stage: str, values: Iterable[float]) -> None:
+        samples = [float(value) for value in values]
+        if not samples:
+            return
+        self._merge(stage, len(samples), sum(samples), max(samples))
 
     def add_summary(self, stage: str, summary: Mapping[str, object]) -> None:
         count = int(summary.get("count", 0))
         total_ms = float(summary.get("total_ms", 0.0))
         max_ms = float(summary.get("max_ms", 0.0))
-        if stage not in self.values:
-            self.values[stage] = [0.0, 0.0, 0.0]
-        current = self.values[stage]
-        current[0] += count
-        current[1] += total_ms
-        current[2] = max(current[2], max_ms)
+        self._merge(stage, count, total_ms, max_ms)
 
     def to_dict(self) -> dict[str, dict[str, int | float]]:
         return {
@@ -903,14 +913,14 @@ class CorpusProcessor:
                 result.identity_ms for result in results if result.parse_count
             ]
             if queue_waits:
-                source_timing.add("queue_start_wait", sum(queue_waits), len(queue_waits))
-                aggregate_timings.add("queue_start_wait", sum(queue_waits), len(queue_waits))
+                source_timing.add_samples("queue_start_wait", queue_waits)
+                aggregate_timings.add_samples("queue_start_wait", queue_waits)
             if parse_times:
-                source_timing.add("parse", sum(parse_times), len(parse_times))
-                aggregate_timings.add("parse", sum(parse_times), len(parse_times))
+                source_timing.add_samples("parse", parse_times)
+                aggregate_timings.add_samples("parse", parse_times)
             if identity_times:
-                source_timing.add("identity_replay", sum(identity_times), len(identity_times))
-                aggregate_timings.add("identity_replay", sum(identity_times), len(identity_times))
+                source_timing.add_samples("identity_replay", identity_times)
+                aggregate_timings.add_samples("identity_replay", identity_times)
 
             def record_writer_timing(stage: str, elapsed_ms: float) -> None:
                 source_timing.add(stage, elapsed_ms)
