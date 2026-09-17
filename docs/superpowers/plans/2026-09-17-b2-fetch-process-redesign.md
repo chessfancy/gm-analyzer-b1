@@ -1,17 +1,17 @@
 # B2 Fetch/Process Redesign Implementation Plan
 
-> Scope: implement Phase A `cgm-fetch` only. Document Phase B `cgm-process`; do not implement it here.
+> Scope: Phase A `cgm-fetch` is complete; this document records that implementation and the approved Phase B `cgm-process` follow-up. Production processing remains out of scope.
 
-**Goal:** Add an explicit fetch-only corpus command that discovers and probes Chess-Results candidates, preserves immutable raw PGNs with provenance, and advances eligible tournaments to `DOWNLOADED` without invoking full-PGN parsing or canonicalization.
+**Goal:** Add an explicit fetch-only corpus command that discovers and probes Chess-Results candidates, preserves immutable raw PGNs with provenance, and advances eligible tournaments to `DOWNLOADED` without invoking full-PGN parsing or canonicalization. Then implement the approved local Phase B processor over that registry/object-store boundary.
 
-**Architecture:** Extract the existing B2a download/register portion behind `AcquisitionService.fetch()`. Keep `AcquisitionService.acquire()` as the backward-compatible full validation/canonicalization API. Add a fetch operation to the existing discovery-to-acquisition bridge instead of creating another Chess-Results discovery implementation. Add `cgm-fetch` as a separate JSON CLI that reuses `ChessResultsDiscovery`, the completeness gate, priority enrichment, the existing adapter, `Registry`, and `LocalObjectStore`.
+**Architecture:** Extract the existing B2a download/register portion behind `AcquisitionService.fetch()`. Keep `AcquisitionService.acquire()` as the backward-compatible full validation/canonicalization API. Add a fetch operation to the existing discovery-to-acquisition bridge instead of creating another Chess-Results discovery implementation. Add `cgm-fetch` as a separate JSON CLI that reuses `ChessResultsDiscovery`, the completeness gate, priority enrichment, the existing adapter, `Registry`, and `LocalObjectStore`. Add `cgm-process` as a local-only one-shot command with a persistent replaceable process pool and a parent-owned canonical writer.
 
-**Verification baseline:** exact starting HEAD `52ab26d35a47c441fecd5bba68f2239be90d62ea`, clean worktree, and the existing baseline of 302 passed / 1 skipped. Production `.cgm/corpus-2026` is out of scope and must not be opened, tested, or mutated.
+**Verification baseline:** the Phase B follow-up starts at exact HEAD `c412fca90793274fb6188782a96d7dbf886c26ff`, clean worktree, and the Phase A baseline of 313 passed / 1 skipped. Production `.cgm/corpus-2026` is out of scope and must not be opened, tested, or mutated.
 
 ## Global constraints
 
 - Work only on `chatgpt-work`; no PR, merge to `main`, force-push, or history rewrite.
-- Commit and push one focused commit after all scoped verification, then stop.
+- Keep the empty-PGN fix and processor implementation as two focused commits; push both only after all scoped verification, then stop.
 - Do not run the production full-year corpus or use `.cgm/corpus-2026` in tests/live smoke.
 - Do not modify B1, B2b, `JobSpec`, `PIPELINE_VERSION`, scheduler, Stockfish, or analysis output.
 - Do not weaken existing tests.
@@ -24,12 +24,17 @@
 docs/superpowers/specs/2026-09-17-b2-fetch-process-redesign.md
 docs/superpowers/plans/2026-09-17-b2-fetch-process-redesign.md
 src/chessgrandmaster/b2/acquisition.py          # extract fetch-only path
+src/chessgrandmaster/b2/canonicalize.py         # reusable processed-game finalizer
+src/chessgrandmaster/b2/processor.py            # local worker pool and corpus processor
+src/chessgrandmaster/b2/cli_process.py          # new cgm-process CLI
+src/chessgrandmaster/b2/registry.py              # deterministic source-file selection support
 src/chessgrandmaster/discovery/acquire.py       # shared candidate bridge operation
 src/chessgrandmaster/b2/cli_fetch.py            # new cgm-fetch corpus CLI
 pyproject.toml                                  # cgm-fetch entry point
 tests/b2/test_acquisition.py                   # fetch service invariants
  tests/discovery/test_discovery_acquisition.py  # fetch bridge isolation/idempotence
  tests/b2/test_fetch_cli.py                     # CLI/report/completeness contract
+tests/b2/test_processor.py                      # Phase B processing/timeout contract
 ```
 
 The leading spaces in the test paths above are only visual grouping; use the repository paths without spaces.
@@ -40,7 +45,7 @@ The leading spaces in the test paths above are only visual grouping; use the rep
 
 - [x] Create the spec with the two-phase architecture, boundaries, raw provenance, processor timeout/isolation/parse-once/writer/timing decisions, and Phase A acceptance contract.
 - [x] Create this implementation plan before source changes.
-- [x] Read both files back and check that Phase B is documented but not implemented.
+- [x] Read both files back and check that Phase B is documented before its separate implementation commit.
 
 Verification: `git diff --check` after the first implementation batch.
 
@@ -225,9 +230,39 @@ Remove only the temporary smoke directory if convenient. Do not inspect or mutat
 
 ---
 
-## Task 8 — Commit, push, and stop
+## Task 8 — Commit A checkpoint
 
-Before commit, verify exact scope and current branch/remote:
+Commit the empty-PGN semantic fix separately after its focused verification:
+
+```text
+fix: classify empty PGN as unavailable
+```
+
+Do not push or start production processing until the Phase B work below is also verified.
+
+---
+
+## Task 9 — Implement and verify Phase B `cgm-process`
+
+Implement the approved Phase B contract from the spec with these boundaries:
+
+- select exact `DOWNLOADED` tournaments only and choose the latest source file by existing timestamp/id precedence;
+- restore and verify immutable objects locally, then segment raw PGN lexically without a second source parse;
+- send one picklable game job to a persistent `spawn` process pool;
+- begin the per-game deadline only after a worker sends `started`;
+- terminate/join/verify a timed-out worker, replace it, and record `ProcessingTimeout` as an invalid occurrence;
+- let the parent be the only Registry writer and feed the reusable processed-game finalizer;
+- preserve existing identity, duplicate, conflict, display/local-occurrence, projection, revision, and status semantics;
+- emit stage timing aggregates and a JSON report without raw PGN text;
+- keep zero-valid sources at `DOWNLOADED` with retained invalid evidence and continue the queue.
+
+Run focused processor tests, then the B2/discovery/full regression suites, compileall, and diff checks. Use only temporary registry/object-store roots for acceptance; never run the production processor.
+
+---
+
+## Task 10 — Push and stop
+
+Before push, verify exact scope and current branch/remote:
 
 ```bash
 git status --short --branch
@@ -238,12 +273,13 @@ git diff --check
 git show --check --oneline --no-renames HEAD
 ```
 
-Commit with:
+Push both focused commits only to `origin/chatgpt-work`:
 
 ```text
-feat: add fetch-only corpus acquisition
+fix: classify empty PGN as unavailable
+feat: add parallel corpus processor
 ```
 
-Push only `chatgpt-work` to `origin`. Verify the pushed SHA with `git rev-parse HEAD` and `git ls-remote origin refs/heads/chatgpt-work`, then stop. Do not start `cgm-process`, the production corpus, TWIC, B2b, or Stockfish.
+Verify the pushed SHA with `git rev-parse HEAD` and `git ls-remote origin refs/heads/chatgpt-work`, then stop. Do not start `cgm-process` against the production corpus, TWIC, B2b, or Stockfish.
 
-Final report must state starting/final HEAD, commit SHA/message, changed files, `cgm-fetch` interface, focused/full test results, compileall and whitespace results, bounded live result, production-path untouched confirmation, B1 untouched confirmation, and any concrete blocker/design discrepancy.
+Final report must state starting/final HEAD, both commit SHAs/messages, changed files, exact `cgm-process` interface, auto-worker formula, timeout/segmentation/parse-once/writer/idempotency strategies, empty-PGN and retry semantics, focused/full test results, compileall and whitespace results, bounded TEMP acceptance result, production-path untouched confirmation, B1 untouched confirmation, and any concrete blocker/design discrepancy.

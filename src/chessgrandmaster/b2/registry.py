@@ -937,6 +937,7 @@ class Registry:
         discovered_at: str | None = None,
         is_valid: bool = True,
         parse_error: str | None = None,
+        replace_invalid: bool = False,
     ) -> int:
         if int(source_game_index) < 1:
             raise ValueError("source_game_index must be at least 1")
@@ -978,6 +979,23 @@ class Registry:
                 ):
                     raise ValueError(
                         "source occurrence is already linked to another canonical game"
+                    )
+                if replace_invalid and existing_game_id is None and canonical_game_id is not None:
+                    connection.execute(
+                        """
+                        UPDATE game_occurrences
+                        SET canonical_game_id = ?, raw_headers_json = ?,
+                            raw_pgn_object_key = ?, is_valid = ?, parse_error = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            canonical_game_id,
+                            headers_json,
+                            raw_pgn_object_key,
+                            int(bool(is_valid)),
+                            parse_error,
+                            int(existing["id"]),
+                        ),
                     )
                 return int(existing["id"])
 
@@ -1532,7 +1550,7 @@ class Registry:
             rows = connection.execute(
                 """
                 SELECT id, source_tournament_id, object_key, filename, sha256,
-                       byte_size, content_type, status, downloaded_at
+                       byte_size, content_type, status, downloaded_at, created_at
                 FROM source_files
                 WHERE tournament_id = ?
                 ORDER BY id
@@ -1554,6 +1572,7 @@ class Registry:
                 "content_type": row["content_type"],
                 "status": row["status"],
                 "downloaded_at": row["downloaded_at"],
+                "created_at": row["created_at"],
             }
             for row in rows
         ]

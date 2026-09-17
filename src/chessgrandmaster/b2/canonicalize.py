@@ -9,7 +9,8 @@ import json
 import os
 from pathlib import Path
 import stat
-from typing import Mapping
+import time
+from typing import Callable, Iterable, Mapping
 
 import chess
 import chess.pgn
@@ -57,6 +58,21 @@ class CanonicalizationResult:
     invalid_game_count: int = 0
     duplicate_occurrence_count: int = 0
     metadata_conflict_count: int = 0
+
+
+@dataclass(frozen=True)
+class ProcessedGameResult:
+    """One source game after parsing and identity validation."""
+
+    source_game_index: int
+    raw_headers: dict[str, str]
+    identity: GameIdentity | None
+    is_valid: bool
+    parse_error: str | None = None
+    parse_ms: float = 0.0
+    identity_ms: float = 0.0
+    parse_count: int = 0
+    queue_wait_ms: float = 0.0
 
 
 def _stable_error(error: BaseException) -> str:
@@ -268,49 +284,44 @@ def _atomic_write(path: Path, content: bytes) -> None:
         raise
 
 
-def canonicalize_source_file(
+def finalize_processed_games(
     registry: Registry,
     tournament_id: int,
     source_file_id: int,
-    raw_path: Path,
+    object_key: str,
+    processed_games: Iterable[ProcessedGameResult],
     output_path: Path,
     canonicalization_policy: str = CANONICALIZATION_POLICY,
+    *,
+    timing_callback: Callable[[str, float], None] | None = None,
 ) -> CanonicalizationResult:
-    """Canonicalize one immutable raw PGN into a content-addressed revision."""
-    raw_path = Path(raw_path).expanduser()
+    """Write already-processed games into one canonical tournament revision."""
     output_path = Path(output_path).expanduser()
-    source_file, raw_bytes = _validate_source_file(
-        registry,
-        tournament_id,
-        source_file_id,
-        raw_path,
+    processed = sorted(
+        list(processed_games),
+        key=lambda result: int(result.source_game_index),
     )
-    if raw_path.resolve() == output_path.resolve():
-        raise ValueError("canonical output path must differ from immutable raw path")
-    try:
-        raw_text = raw_bytes.decode("utf-8-sig")
-    except UnicodeDecodeError as exc:
-        raise ValueError("raw PGN must be UTF-8, with an optional BOM") from exc
+    indexes = [int(result.source_game_index) for result in processed]
+    if any(index < 1 for index in indexes) or len(indexes) != len(set(indexes)):
+        raise ValueError("processed source game indexes must be unique and positive")
 
-    stream = io.StringIO(raw_text)
-    object_key = str(source_file["object_key"])
+    def emit_timing(stage: str, started: float) -> None:
+        if timing_callback is not None:
+            timing_callback(stage, (time.perf_counter() - started) * 1000.0)
+
     ordered_game_ids: list[int] = []
     seen_game_ids: set[int] = set()
     seen_fingerprints: set[str] = set()
     identities: dict[int, GameIdentity] = {}
-    source_game_count = 0
     valid_game_count = 0
     invalid_game_count = 0
     duplicate_occurrence_count = 0
 
-    while True:
-        game = chess.pgn.read_game(stream)
-        if game is None:
-            break
-        source_game_count += 1
-        source_game_index = source_game_count
-        headers = _game_headers(game)
-        if game.errors:
+    sqlite_started = time.perf_counter()
+    for result in processed:
+        source_game_index = int(result.source_game_index)
+        headers = {str(key): str(value) for key, value in result.raw_headers.items()}
+        if not result.is_valid or result.identity is None:
             _record_invalid(
                 registry,
                 tournament_id,
@@ -318,27 +329,12 @@ def canonicalize_source_file(
                 source_game_index,
                 headers,
                 object_key,
-                "; ".join(_stable_error(error) for error in game.errors),
+                result.parse_error or "ProcessingError: game was invalid",
             )
             invalid_game_count += 1
             continue
 
-        try:
-            identity = identify_game(game)
-            _replay_identity(identity)
-        except (ValueError, KeyError, TypeError) as exc:
-            _record_invalid(
-                registry,
-                tournament_id,
-                source_file_id,
-                source_game_index,
-                headers,
-                object_key,
-                exc,
-            )
-            invalid_game_count += 1
-            continue
-
+        identity = result.identity
         canonical_game_id = registry.upsert_canonical_game(identity)
         registry.record_occurrence(
             canonical_game_id=canonical_game_id,
@@ -347,6 +343,7 @@ def canonicalize_source_file(
             source_game_index=source_game_index,
             raw_headers=headers,
             raw_pgn_object_key=object_key,
+            replace_invalid=True,
         )
         valid_game_count += 1
         if identity.fingerprint in seen_fingerprints:
@@ -356,10 +353,12 @@ def canonicalize_source_file(
             seen_game_ids.add(canonical_game_id)
             ordered_game_ids.append(canonical_game_id)
             identities[canonical_game_id] = identity
+    emit_timing("sqlite_write", sqlite_started)
 
     if not ordered_game_ids:
         raise RuntimeError("canonicalization produced zero valid games")
 
+    metadata_started = time.perf_counter()
     metadata_conflict_count = 0
     selected_occurrence_ids: dict[int, int] = {}
     selected_headers: dict[int, dict[str, str]] = {}
@@ -389,15 +388,19 @@ def canonicalize_source_file(
         local_occurrence = local_candidates[0]
         selected_occurrence_ids[canonical_game_id] = int(local_occurrence["id"])
         selected_headers[canonical_game_id] = _occurrence_headers(local_occurrence)
+    emit_timing("metadata_display_selection", metadata_started)
 
+    projection_started = time.perf_counter()
     projected_games = [
         _export_projection(identities[canonical_game_id], selected_headers[canonical_game_id])
         for canonical_game_id in ordered_game_ids
     ]
     canonical_bytes = ("\n\n".join(projected_games) + "\n").encode("utf-8")
     canonical_sha256 = hashlib.sha256(canonical_bytes).hexdigest()
+    emit_timing("projection_export", projection_started)
 
     _atomic_write(output_path, canonical_bytes)
+    revision_started = time.perf_counter()
     revision_id, revision_number = registry.create_or_get_revision(
         tournament_id,
         canonical_sha256,
@@ -408,6 +411,7 @@ def canonicalize_source_file(
         ordered_game_ids,
         selected_occurrence_ids,
     )
+    emit_timing("revision_finalization", revision_started)
 
     return CanonicalizationResult(
         tournament_id=int(tournament_id),
@@ -417,9 +421,95 @@ def canonicalize_source_file(
         game_count=len(ordered_game_ids),
         ply_count=sum(identities[game_id].ply_count for game_id in ordered_game_ids),
         canonical_path=output_path,
-        source_game_count=source_game_count,
+        source_game_count=len(processed),
         valid_game_count=valid_game_count,
         invalid_game_count=invalid_game_count,
         duplicate_occurrence_count=duplicate_occurrence_count,
         metadata_conflict_count=metadata_conflict_count,
+    )
+
+
+def canonicalize_source_file(
+    registry: Registry,
+    tournament_id: int,
+    source_file_id: int,
+    raw_path: Path,
+    output_path: Path,
+    canonicalization_policy: str = CANONICALIZATION_POLICY,
+) -> CanonicalizationResult:
+    """Canonicalize one immutable raw PGN into a content-addressed revision."""
+    raw_path = Path(raw_path).expanduser()
+    output_path = Path(output_path).expanduser()
+    source_file, raw_bytes = _validate_source_file(
+        registry,
+        tournament_id,
+        source_file_id,
+        raw_path,
+    )
+    if raw_path.resolve() == output_path.resolve():
+        raise ValueError("canonical output path must differ from immutable raw path")
+    try:
+        raw_text = raw_bytes.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ValueError("raw PGN must be UTF-8, with an optional BOM") from exc
+
+    stream = io.StringIO(raw_text)
+    object_key = str(source_file["object_key"])
+    processed_games: list[ProcessedGameResult] = []
+
+    while True:
+        game = chess.pgn.read_game(stream)
+        if game is None:
+            break
+        source_game_index = len(processed_games) + 1
+        headers = _game_headers(game)
+        if game.errors:
+            processed_games.append(
+                ProcessedGameResult(
+                    source_game_index=source_game_index,
+                    raw_headers=headers,
+                    identity=None,
+                    is_valid=False,
+                    parse_error="; ".join(
+                        _stable_error(error) for error in game.errors
+                    ),
+                    parse_count=1,
+                )
+            )
+            continue
+
+        try:
+            identity = identify_game(game)
+            _replay_identity(identity)
+        except (ValueError, KeyError, TypeError) as exc:
+            processed_games.append(
+                ProcessedGameResult(
+                    source_game_index=source_game_index,
+                    raw_headers=headers,
+                    identity=None,
+                    is_valid=False,
+                    parse_error=_stable_error(exc),
+                    parse_count=1,
+                )
+            )
+            continue
+
+        processed_games.append(
+            ProcessedGameResult(
+                source_game_index=source_game_index,
+                raw_headers=headers,
+                identity=identity,
+                is_valid=True,
+                parse_count=1,
+            )
+        )
+
+    return finalize_processed_games(
+        registry,
+        tournament_id,
+        source_file_id,
+        object_key,
+        processed_games,
+        output_path,
+        canonicalization_policy,
     )

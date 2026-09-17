@@ -2,7 +2,7 @@
 
 Date: 2026-09-17
 Branch: `chatgpt-work`
-Status: Phase A implementation approved; Phase B contract documented only
+Status: Phase A and Phase B implemented; B2b remains deferred
 
 ## Goal
 
@@ -19,7 +19,7 @@ The registry and immutable object store remain the handoff boundary between the 
 ## Non-goals and frozen boundaries
 
 - Do not change B1 chess semantics, Lucas classification, Stockfish search policy, depth policy, snapshot policy, scheduler, game affinity, platform resource profiles, Hash settings, PGN export behavior, raw UCI telemetry, `JobSpec`, or `PIPELINE_VERSION`.
-- Do not implement B2b, serverless workers, a queue service, or `cgm-process` in the Phase A commit.
+- Do not implement B2b, serverless workers, or an external queue service. `cgm-process` is implemented only in the separate Phase B commit.
 - Do not run the production full-year corpus as validation for this change.
 - Do not modify the user's production `.cgm/corpus-2026` registry, objects, or workspace.
 - Do not replace or delete immutable raw PGN objects.
@@ -50,7 +50,7 @@ One candidate's probe, download, or provenance failure is isolated into a struct
 
 A successful provider download that yields zero bytes is a typed `NoUsablePgnError` with stable reason `empty_pgn`. It records the failed download attempt for audit, creates neither a raw object nor a `source_file`, and is reported as `skipped_no_pgn` rather than `failed`. Timeouts, connection/HTTP errors, storage errors, HTML/error bodies, and other operational failures remain `failed` and retryable; no title or external-ID blacklist is persisted.
 
-### Phase B — `cgm-process` (documented contract; later task)
+### Phase B — `cgm-process` (implemented in the separate processor commit)
 
 ```text
 DOWNLOADED source files
