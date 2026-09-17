@@ -7,6 +7,16 @@ from pathlib import Path
 from typing import Protocol
 
 
+class NoUsablePgnError(RuntimeError):
+    """Provider returned a successful but unusable PGN response."""
+
+    def __init__(self, reason: str = "empty_pgn") -> None:
+        if reason != "empty_pgn":
+            raise ValueError("unsupported unusable-PGN reason")
+        self.reason = reason
+        super().__init__(reason)
+
+
 @dataclass(frozen=True)
 class SourceRef:
     """Stable provider-specific identity plus the supplied source URL."""
@@ -41,4 +51,9 @@ class SourceAdapter(Protocol):
         ...
 
 
-__all__ = ["SourceAdapter", "SourceDescriptor", "SourceRef"]
+__all__ = [
+    "NoUsablePgnError",
+    "SourceAdapter",
+    "SourceDescriptor",
+    "SourceRef",
+]

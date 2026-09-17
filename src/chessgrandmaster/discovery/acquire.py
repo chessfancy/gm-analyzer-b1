@@ -8,6 +8,7 @@ from typing import Callable, Sequence
 
 from chessgrandmaster.b2.acquisition import AcquisitionService
 from chessgrandmaster.b2.registry import Registry
+from chessgrandmaster.b2.sources.base import NoUsablePgnError
 from chessgrandmaster.b2.sources.chess_results import PgnAvailability
 
 from .chess_results import ChessResultsCandidate
@@ -48,6 +49,7 @@ class CandidateAcquisition:
     source_file_id: int | None = None
     raw_object_key: str | None = None
     download_attempt_id: int | None = None
+    reason: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -65,6 +67,7 @@ class CandidateAcquisition:
             "source_file_id": self.source_file_id,
             "raw_object_key": self.raw_object_key,
             "download_attempt_id": self.download_attempt_id,
+            "reason": self.reason,
         }
 
 
@@ -246,7 +249,11 @@ class DiscoveryAcquisitionService:
         )
 
     @staticmethod
-    def _no_pgn_result(candidate: ChessResultsCandidate) -> CandidateAcquisition:
+    def _no_pgn_result(
+        candidate: ChessResultsCandidate,
+        *,
+        reason: str | None = None,
+    ) -> CandidateAcquisition:
         return CandidateAcquisition(
             provider=candidate.provider,
             external_id=candidate.external_id,
@@ -256,6 +263,7 @@ class DiscoveryAcquisitionService:
             tournament_status=None,
             raw_sha256=None,
             revision_id=None,
+            reason=reason,
         )
 
     @staticmethod
@@ -381,6 +389,14 @@ class DiscoveryAcquisitionService:
                     results.append(self._no_pgn_result(candidate))
                     continue
                 acquisition_result = operation(candidate.source_url)
+            except NoUsablePgnError as exc:
+                results.append(
+                    self._no_pgn_result(
+                        candidate,
+                        reason=exc.reason,
+                    )
+                )
+                continue
             except Exception as exc:
                 results.append(
                     self._failed_result(

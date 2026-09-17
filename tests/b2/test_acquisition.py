@@ -645,3 +645,18 @@ def test_fetch_rejects_empty_or_html_provider_response_without_raw_provenance(
     assert registry.registry_counts()["game_occurrences"] == 0
     assert registry.registry_counts()["tournament_revisions"] == 0
     assert store.list("") == []
+
+
+def test_fetch_empty_pgn_error_is_typed_and_attempt_remains_auditable(tmp_path):
+    service, registry, store, _ = _service(tmp_path, pgn_bytes=b"")
+
+    with pytest.raises(RuntimeError) as raised:
+        service.fetch("tnr1450909")
+
+    assert getattr(raised.value, "reason", None) == "empty_pgn"
+    assert str(raised.value) == "empty_pgn"
+    attempt = _rows(registry, "download_attempts")[0]
+    assert attempt["source_file_id"] is None
+    assert attempt["error"] == "empty_pgn"
+    assert registry.registry_counts()["source_files"] == 0
+    assert store.list("") == []

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from chessgrandmaster.b2.registry import Registry
+from chessgrandmaster.b2.sources.base import NoUsablePgnError
 from chessgrandmaster.discovery.chess_results import ChessResultsCandidate
 from chessgrandmaster.discovery.acquire import DiscoveryAcquisitionService
 
@@ -285,6 +286,77 @@ def test_fetch_failure_isolated_and_later_candidate_continues(tmp_path):
     assert batch.results[1].error_type == "RuntimeError"
     assert "raw download failed" in (batch.results[1].error_message or "")
     assert acquisition.calls == [candidate.source_url for candidate in candidates]
+
+
+def test_fetch_empty_pgn_is_unavailable_not_failed_and_later_candidate_continues(
+    tmp_path,
+):
+    registry = Registry(tmp_path / "registry.sqlite")
+    candidates = [
+        _candidate("tnr1430071"),
+        _candidate("tnr1450911"),
+    ]
+
+    class _FetchAcquisition(_FakeAcquisition):
+        def fetch(self, source_url: str):
+            self.calls.append(source_url)
+            outcome = self.outcomes[source_url]
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+
+    acquisition = _FetchAcquisition(
+        {
+            candidates[0].source_url: NoUsablePgnError("empty_pgn"),
+            candidates[1].source_url: SimpleNamespace(
+                tournament_id=2,
+                tournament_status="DOWNLOADED",
+                source_file_id=22,
+                raw_sha256="b" * 64,
+            ),
+        }
+    )
+
+    batch = DiscoveryAcquisitionService(
+        registry,
+        acquisition,
+        _available_probe,
+    ).fetch_candidates(candidates)
+
+    assert batch.skipped_no_pgn == 1
+    assert batch.failed == 0
+    assert batch.fetched == 1
+    assert [result.action for result in batch.results] == [
+        "skipped_no_pgn",
+        "fetched",
+    ]
+    assert batch.results[0].reason == "empty_pgn"
+    assert acquisition.calls == [candidate.source_url for candidate in candidates]
+
+
+def test_fetch_empty_pgn_uses_response_semantics_not_title_heuristics(tmp_path):
+    registry = Registry(tmp_path / "registry.sqlite")
+    candidate = _candidate("tnr9999999")
+    candidate = ChessResultsCandidate(
+        **{**candidate.__dict__, "title": "TEST TEAM CESAR GARFIAS"}
+    )
+    empty = NoUsablePgnError("empty_pgn")
+
+    class _FetchAcquisition(_FakeAcquisition):
+        def fetch(self, source_url: str):
+            self.calls.append(source_url)
+            raise empty
+
+    acquisition = _FetchAcquisition({})
+    batch = DiscoveryAcquisitionService(
+        registry,
+        acquisition,
+        _available_probe,
+    ).fetch_candidates([candidate])
+
+    assert batch.failed == 0
+    assert batch.skipped_no_pgn == 1
+    assert batch.results[0].reason == "empty_pgn"
 
 
 @pytest.mark.parametrize("status", ["CANONICALIZED", "SHARDED", "READY"])

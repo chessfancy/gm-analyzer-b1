@@ -48,6 +48,8 @@ For a fetch-stage-completed candidate (`DOWNLOADED`, `VALIDATED`, `CANONICALIZED
 
 One candidate's probe, download, or provenance failure is isolated into a structured result. The batch continues with later candidates.
 
+A successful provider download that yields zero bytes is a typed `NoUsablePgnError` with stable reason `empty_pgn`. It records the failed download attempt for audit, creates neither a raw object nor a `source_file`, and is reported as `skipped_no_pgn` rather than `failed`. Timeouts, connection/HTTP errors, storage errors, HTML/error bodies, and other operational failures remain `failed` and retryable; no title or external-ID blacklist is persisted.
+
 ### Phase B — `cgm-process` (documented contract; later task)
 
 ```text

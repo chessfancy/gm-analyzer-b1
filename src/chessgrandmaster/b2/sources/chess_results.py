@@ -14,7 +14,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import unquote, urlencode, urljoin, urlparse, urlunparse
 from urllib.request import HTTPCookieProcessor, Request, build_opener
 
-from .base import SourceDescriptor, SourceRef
+from .base import NoUsablePgnError, SourceDescriptor, SourceRef
 
 
 PROVIDER = "chess-results"
@@ -1193,7 +1193,7 @@ class ChessResultsAdapter:
                     byte_count += len(block)
                 self.last_download_byte_count = byte_count
                 if byte_count == 0:
-                    raise RuntimeError("Chess-Results PGN download was empty")
+                    raise NoUsablePgnError()
                 if (
                     self.last_download_content_type == "text/html"
                     or _looks_like_html(bytes(prefix))

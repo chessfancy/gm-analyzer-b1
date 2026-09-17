@@ -14,7 +14,12 @@ import chess.pgn
 
 from .canonicalize import CanonicalizationResult, canonicalize_source_file
 from .registry import Registry
-from .sources.base import SourceAdapter, SourceDescriptor, SourceRef
+from .sources.base import (
+    NoUsablePgnError,
+    SourceAdapter,
+    SourceDescriptor,
+    SourceRef,
+)
 from .storage import ObjectStore
 from .identity import identify_game
 
@@ -78,6 +83,8 @@ class _ValidationSummary:
 
 
 def _stable_error(error: BaseException) -> str:
+    if isinstance(error, NoUsablePgnError):
+        return error.reason
     message = " ".join(str(error).split())
     name = type(error).__name__
     return f"{name}: {message}" if message else name
@@ -277,7 +284,7 @@ class AcquisitionService:
                 raw_bytes = downloaded_path.read_bytes()
                 raw_byte_size = len(raw_bytes)
                 if raw_byte_size == 0:
-                    raise ValueError("downloaded PGN is empty")
+                    raise NoUsablePgnError()
                 raw_sha256 = hashlib.sha256(raw_bytes).hexdigest()
                 raw_object_key = (
                     f"tournaments/{tournament_id}/source/{provider}/"
