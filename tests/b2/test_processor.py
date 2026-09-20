@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 import time
 
+import pytest
+
 import chessgrandmaster.b2.processor as processor_module
 from chessgrandmaster.b2.canonicalize import canonicalize_source_file
 from chessgrandmaster.b2.cli_process import build_parser, main
@@ -336,6 +338,114 @@ def test_processor_rerun_skips_canonicalized_without_duplicates(tmp_path):
     assert second.selected_tournaments == 0
     assert second.processed_tournaments == 0
     assert registry.registry_counts() == counts_after_first
+
+
+def test_interrupted_downloaded_tournament_resumes_without_duplicate_rows(
+    tmp_path, monkeypatch
+):
+    registry = Registry(tmp_path / "registry.sqlite")
+    tournament_id = registry.upsert_tournament("interrupted", status="DOWNLOADED")
+    raw = SINGLE_GAME + b"\n" + INVALID_GAME + b"\n" + SINGLE_GAME
+    _seed_source(
+        tmp_path,
+        registry,
+        LocalObjectStore(tmp_path / "objects"),
+        tournament_id,
+        raw,
+        "interrupted",
+    )
+    processor, _ = _processor(tmp_path, registry)
+    real_finalize = processor_module.finalize_processed_games
+
+    def interrupt_after_persist(*args, **kwargs):
+        result = real_finalize(*args, **kwargs)
+        raise KeyboardInterrupt("simulated operator stop")
+
+    monkeypatch.setattr(
+        processor_module,
+        "finalize_processed_games",
+        interrupt_after_persist,
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="simulated operator stop"):
+        processor.process()
+
+    assert registry.get_tournament_status(tournament_id) == "DOWNLOADED"
+    interrupted_counts = registry.registry_counts()
+    assert interrupted_counts["canonical_games"] == 1
+    assert interrupted_counts["game_occurrences"] == 3
+    assert interrupted_counts["tournament_revisions"] == 1
+    assert interrupted_counts["tournament_games"] == 1
+    interrupted_revision = registry.list_revisions_for_tournament(tournament_id)
+    assert len(interrupted_revision) == 1
+    interrupted_revision_id = interrupted_revision[0]["revision_id"]
+    interrupted_membership = registry.get_revision_games(interrupted_revision_id)
+    canonical_game_id = interrupted_membership[0]["canonical_game_id"]
+    interrupted_occurrences = registry.get_occurrences(canonical_game_id)
+    assert len(interrupted_occurrences) == 2
+    with registry._connect() as connection:
+        invalid_rows = connection.execute(
+            """
+            SELECT id, canonical_game_id, is_valid, parse_error, source_game_index
+            FROM game_occurrences
+            WHERE source_file_id = (SELECT id FROM source_files WHERE tournament_id = ?)
+              AND is_valid = 0
+            """,
+            (tournament_id,),
+        ).fetchall()
+    assert len(invalid_rows) == 1
+    assert invalid_rows[0]["canonical_game_id"] is None
+    assert invalid_rows[0]["parse_error"]
+    invalid_occurrence_id = invalid_rows[0]["id"]
+
+    monkeypatch.setattr(processor_module, "finalize_processed_games", real_finalize)
+    resumed = processor.process()
+
+    assert resumed.selected_tournaments == 1
+    assert resumed.canonicalized == 1
+    assert resumed.review_required_sources == 0
+    assert resumed.results[0].valid_game_count == 2
+    assert resumed.results[0].invalid_game_count == 1
+    assert resumed.results[0].duplicate_occurrence_count == 1
+    assert resumed.source_games == 3
+    assert resumed.valid_games == 2
+    assert resumed.invalid_games == 1
+    assert resumed.timed_out_games == 0
+    assert resumed.duplicate_occurrences == 1
+    assert resumed.metadata_conflicts == 0
+    assert resumed.worker_replacements == 0
+    assert resumed.results[0].timing["restore_checksum"]["count"] == 1
+    assert resumed.results[0].timing["segmentation"]["count"] == 1
+    for stage in ("queue_start_wait", "parse", "identity_replay"):
+        assert resumed.results[0].timing[stage]["count"] == 3
+    for stage in (
+        "sqlite_write",
+        "metadata_display_selection",
+        "projection_export",
+        "revision_finalization",
+        "total_source",
+    ):
+        assert resumed.results[0].timing[stage]["count"] == 1
+    assert resumed.timings == resumed.results[0].timing
+    assert resumed.to_dict()["results"][0]["action"] == "canonicalized"
+    assert resumed.to_dict()["timings"] == resumed.timings
+    assert registry.get_tournament_status(tournament_id) == "CANONICALIZED"
+    assert registry.registry_counts() == interrupted_counts
+    resumed_revision = registry.list_revisions_for_tournament(tournament_id)
+    assert resumed_revision == interrupted_revision
+    assert registry.get_occurrences(canonical_game_id) == interrupted_occurrences
+    with registry._connect() as connection:
+        resumed_invalid = connection.execute(
+            """
+            SELECT id, canonical_game_id, is_valid, parse_error, source_game_index
+            FROM game_occurrences WHERE id = ?
+            """,
+            (invalid_occurrence_id,),
+        ).fetchone()
+    assert resumed_invalid["id"] == invalid_occurrence_id
+    assert resumed_invalid["canonical_game_id"] is None
+    assert resumed_invalid["is_valid"] == 0
+    assert resumed_invalid["parse_error"]
 
 
 def test_preexisting_invalid_occurrence_is_upgraded_without_duplicate_row(tmp_path):
