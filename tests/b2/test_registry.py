@@ -51,6 +51,44 @@ def test_registry_schema_is_idempotent_and_foreign_keys_are_enabled(tmp_path):
     )[0][0] == "1"
 
 
+def test_registry_creates_occurrence_lookup_index_and_repairs_existing_v1(tmp_path):
+    path = tmp_path / "registry.sqlite"
+    registry = Registry(path)
+
+    def index_names():
+        return {
+            row[1]
+            for row in rows_for(registry, "PRAGMA index_list('game_occurrences')")
+        }
+
+    assert "idx_game_occurrences_canonical_valid_tournament" in index_names()
+
+    with registry._connect() as connection:
+        connection.execute(
+            "DROP INDEX idx_game_occurrences_canonical_valid_tournament"
+        )
+    assert "idx_game_occurrences_canonical_valid_tournament" not in index_names()
+
+    reopened = Registry(path)
+    assert "idx_game_occurrences_canonical_valid_tournament" in {
+        row[1]
+        for row in rows_for(reopened, "PRAGMA index_list('game_occurrences')")
+    }
+
+
+def test_occurrence_lookup_query_plan_uses_canonical_index(tmp_path):
+    registry = Registry(tmp_path / "registry.sqlite")
+    plan = rows_for(
+        registry,
+        "EXPLAIN QUERY PLAN SELECT * FROM game_occurrences "
+        "WHERE canonical_game_id = ? ORDER BY id",
+        (1,),
+    )
+    details = " ".join(str(row[3]) for row in plan)
+    assert "SCAN game_occurrences" not in details
+    assert "idx_game_occurrences_canonical_valid_tournament" in details
+
+
 def test_registry_reuses_sources_and_exact_identities(tmp_path):
     registry = Registry(tmp_path / "registry.sqlite")
 

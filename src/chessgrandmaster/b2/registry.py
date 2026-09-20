@@ -157,6 +157,9 @@ CREATE TABLE IF NOT EXISTS game_occurrences (
     FOREIGN KEY (source_file_id) REFERENCES source_files(id) ON DELETE CASCADE
 );
 
+CREATE INDEX IF NOT EXISTS idx_game_occurrences_canonical_valid_tournament
+ON game_occurrences(canonical_game_id, is_valid, tournament_id);
+
 CREATE TABLE IF NOT EXISTS game_metadata_conflicts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     canonical_game_id INTEGER NOT NULL,
