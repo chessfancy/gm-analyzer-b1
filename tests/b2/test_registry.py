@@ -22,6 +22,8 @@ EXPECTED_TABLES = {
     "tournament_games",
 }
 
+OCCURRENCE_LOOKUP_INDEX = "idx_game_occurrences_canonical_valid_tournament"
+
 
 def rows_for(registry, query, parameters=()):
     with registry._connect() as connection:
@@ -61,19 +63,27 @@ def test_registry_creates_occurrence_lookup_index_and_repairs_existing_v1(tmp_pa
             for row in rows_for(registry, "PRAGMA index_list('game_occurrences')")
         }
 
-    assert "idx_game_occurrences_canonical_valid_tournament" in index_names()
+    assert OCCURRENCE_LOOKUP_INDEX in index_names()
 
     with registry._connect() as connection:
-        connection.execute(
-            "DROP INDEX idx_game_occurrences_canonical_valid_tournament"
-        )
-    assert "idx_game_occurrences_canonical_valid_tournament" not in index_names()
+        connection.execute(f"DROP INDEX {OCCURRENCE_LOOKUP_INDEX}")
+    assert OCCURRENCE_LOOKUP_INDEX not in index_names()
 
     reopened = Registry(path)
-    assert "idx_game_occurrences_canonical_valid_tournament" in {
+    reopened.ensure_schema()
+    reopened_again = Registry(path)
+    repaired_indexes = {
         row[1]
-        for row in rows_for(reopened, "PRAGMA index_list('game_occurrences')")
+        for row in rows_for(reopened_again, "PRAGMA index_list('game_occurrences')")
     }
+    assert OCCURRENCE_LOOKUP_INDEX in repaired_indexes
+    assert [
+        row[2]
+        for row in rows_for(
+            reopened_again,
+            f"PRAGMA index_info('{OCCURRENCE_LOOKUP_INDEX}')",
+        )
+    ] == ["canonical_game_id", "is_valid", "tournament_id"]
 
 
 def test_occurrence_lookup_query_plan_uses_canonical_index(tmp_path):
@@ -86,7 +96,64 @@ def test_occurrence_lookup_query_plan_uses_canonical_index(tmp_path):
     )
     details = " ".join(str(row[3]) for row in plan)
     assert "SCAN game_occurrences" not in details
-    assert "idx_game_occurrences_canonical_valid_tournament" in details
+    assert OCCURRENCE_LOOKUP_INDEX in details
+
+
+def test_occurrence_lookup_index_covers_all_hot_candidate_query_shapes(tmp_path):
+    registry = Registry(tmp_path / "registry.sqlite")
+
+    occurrence_queries = [
+        "SELECT * FROM game_occurrences WHERE canonical_game_id = ?",
+        "SELECT * FROM game_occurrences "
+        "WHERE canonical_game_id = ? AND is_valid = 1",
+        "SELECT * FROM game_occurrences "
+        "WHERE canonical_game_id = ? AND is_valid = 1 AND tournament_id = ?",
+    ]
+    occurrence_parameters = [(1,), (1,), (1, 2)]
+    for query, parameters in zip(occurrence_queries, occurrence_parameters):
+        plan = rows_for(
+            registry,
+            f"EXPLAIN QUERY PLAN {query}",
+            parameters,
+        )
+        details = " ".join(str(row[3]) for row in plan)
+        assert OCCURRENCE_LOOKUP_INDEX in details
+        assert "SCAN game_occurrences" not in details
+
+    candidate_queries = [
+        (
+            "SELECT go.*, sf.sha256 AS source_file_sha256, "
+            "s.name AS source_name, s.priority AS source_priority "
+            "FROM game_occurrences AS go "
+            "JOIN source_files AS sf ON sf.id = go.source_file_id "
+            "JOIN sources AS s ON s.id = sf.source_id "
+            "WHERE go.canonical_game_id = ? AND go.is_valid = 1 "
+            "ORDER BY s.priority DESC, s.name ASC, sf.sha256 ASC, "
+            "go.source_game_index ASC, go.id ASC",
+            (1,),
+        ),
+        (
+            "SELECT go.*, sf.sha256 AS source_file_sha256, "
+            "s.name AS source_name, s.priority AS source_priority "
+            "FROM game_occurrences AS go "
+            "JOIN source_files AS sf ON sf.id = go.source_file_id "
+            "JOIN sources AS s ON s.id = sf.source_id "
+            "WHERE go.canonical_game_id = ? AND go.is_valid = 1 "
+            "AND go.tournament_id = ? "
+            "ORDER BY s.priority DESC, s.name ASC, sf.sha256 ASC, "
+            "go.source_game_index ASC, go.id ASC",
+            (1, 2),
+        ),
+    ]
+    for query, parameters in candidate_queries:
+        plan = rows_for(
+            registry,
+            f"EXPLAIN QUERY PLAN {query}",
+            parameters,
+        )
+        details = " ".join(str(row[3]) for row in plan)
+        assert f"SEARCH go USING INDEX {OCCURRENCE_LOOKUP_INDEX}" in details
+        assert "SCAN go" not in details
 
 
 def test_registry_reuses_sources_and_exact_identities(tmp_path):
@@ -645,6 +712,15 @@ def test_occurrence_candidates_and_display_selection_are_public_and_deterministi
     assert candidates[0]["source_priority"] == 50
     assert candidates[0]["source_file_sha256"] == "b" * 64
     assert candidates[0]["tournament_id"] == tournament_high
+
+    local_candidates = registry.list_valid_occurrence_candidates(
+        canonical_game_id,
+        tournament_id=tournament_high,
+    )
+    assert [candidate["id"] for candidate in local_candidates] == [
+        high_occurrence_id,
+    ]
+    assert local_candidates[0]["source_name"] == "official"
 
     registry.set_canonical_display_occurrence(
         canonical_game_id,
