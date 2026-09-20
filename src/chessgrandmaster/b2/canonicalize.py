@@ -379,10 +379,13 @@ def finalize_processed_games(
             _occurrence_headers(global_occurrence),
         )
 
-        local_candidates = registry.list_valid_occurrence_candidates(
-            canonical_game_id,
-            tournament_id=tournament_id,
-        )
+        # The local query has the same precedence ordering as the global query;
+        # filtering this ordered result preserves its exact local subset.
+        local_candidates = [
+            candidate
+            for candidate in global_candidates
+            if int(candidate["tournament_id"]) == int(tournament_id)
+        ]
         if not local_candidates:
             raise RuntimeError("canonical game has no local valid occurrence")
         local_occurrence = local_candidates[0]
