@@ -188,6 +188,15 @@ class PackageService:
         return verified
 
     @staticmethod
+    def _manifest_source(source) -> dict[str, object]:
+        payload = source.to_dict()
+        # last_seen_at changes on every provider refresh even when the raw file
+        # and canonical revision are unchanged, so it cannot be part of the
+        # deterministic cgm-tournament-1 bytes.
+        payload.pop("last_seen_at", None)
+        return payload
+
+    @staticmethod
     def _properties(source: RevisionPackageSource) -> dict[str, object]:
         return {
             "site": source.site,
@@ -312,7 +321,9 @@ class PackageService:
             tournament_id=source.tournament_id,
             revision=source.revision_number,
             name=source.name,
-            sources=tuple(source_item.to_dict() for source_item in source.sources),
+            sources=tuple(
+                self._manifest_source(source_item) for source_item in source.sources
+            ),
             canonical_pgn={
                 "key": canonical_key,
                 "sha256": canonical_sha256,
