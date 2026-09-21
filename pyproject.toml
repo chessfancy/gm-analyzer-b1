@@ -20,11 +20,15 @@ cgm-acquire = "chessgrandmaster.b2.cli_acquire:main"
 cgm-fetch = "chessgrandmaster.b2.cli_fetch:main"
 cgm-process = "chessgrandmaster.b2.cli_process:main"
 cgm-registry = "chessgrandmaster.b2.cli_registry:main"
+cgm-package = "chessgrandmaster.b2.cli_package:main"
 cgm-discover = "chessgrandmaster.discovery.cli:main"
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
+]
+s3 = [
+    "boto3>=1.35",
 ]
 
 [tool.setuptools.packages.find]

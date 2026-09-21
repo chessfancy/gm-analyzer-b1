@@ -51,6 +51,11 @@ def _file_digest(path: Path) -> tuple[int, str]:
     return size, digest.hexdigest()
 
 
+def sha256_file(path: Path) -> str:
+    """Return the stable SHA256 digest of a regular file."""
+    return _file_digest(Path(path))[1]
+
+
 def _copy_and_digest(source: Path, destination: Path) -> tuple[int, str]:
     digest = hashlib.sha256()
     size = 0

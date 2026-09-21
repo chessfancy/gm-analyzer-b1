@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -242,6 +243,255 @@ def _bool_value(value: bool | int | None) -> int | None:
 
 def _row_dict(row: sqlite3.Row) -> dict[str, object]:
     return {key: row[key] for key in row.keys()}
+
+
+def _json_object(value: object, *, label: str) -> dict[str, object]:
+    if isinstance(value, dict):
+        return {str(key): item for key, item in value.items()}
+    try:
+        parsed = json.loads(str(value))
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"stored {label} is not valid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError(f"stored {label} must be a JSON object")
+    return {str(key): item for key, item in parsed.items()}
+
+
+class _MappingDTO:
+    """Small compatibility surface for JSON-like registry DTOs."""
+
+    _ALIASES: dict[str, str] = {}
+
+    def __getitem__(self, key: str) -> object:
+        actual = self._ALIASES.get(key, key)
+        try:
+            return getattr(self, actual)
+        except AttributeError as exc:
+            raise KeyError(key) from exc
+
+    def get(self, key: str, default: object = None) -> object:
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+
+@dataclass(frozen=True)
+class RevisionSourceFile(_MappingDTO):
+    source_file_id: int
+    object_key: str
+    filename: str | None
+    sha256: str
+    byte_size: int
+    content_type: str | None
+    status: str
+    downloaded_at: str | None
+    source_url: str | None
+
+    _ALIASES = {"id": "source_file_id"}
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "source_file_id": self.source_file_id,
+            "object_key": self.object_key,
+            "filename": self.filename,
+            "sha256": self.sha256,
+            "byte_size": self.byte_size,
+            "content_type": self.content_type,
+            "status": self.status,
+            "downloaded_at": self.downloaded_at,
+            "source_url": self.source_url,
+        }
+
+
+@dataclass(frozen=True)
+class RevisionSource(_MappingDTO):
+    source_tournament_id: int
+    provider: str
+    external_id: str
+    source_url: str | None
+    pgn_url: str | None
+    discovered_at: str | None
+    last_seen_at: str | None
+    files: tuple[RevisionSourceFile, ...] = ()
+
+    _ALIASES = {
+        "id": "source_tournament_id",
+        "source_name": "provider",
+    }
+
+    @property
+    def source_name(self) -> str:
+        return self.provider
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "source_tournament_id": self.source_tournament_id,
+            "provider": self.provider,
+            "external_id": self.external_id,
+            "source_url": self.source_url,
+            "pgn_url": self.pgn_url,
+            "discovered_at": self.discovered_at,
+            "last_seen_at": self.last_seen_at,
+            "files": [source_file.to_dict() for source_file in self.files],
+        }
+
+
+@dataclass(frozen=True)
+class RevisionGameOccurrence(_MappingDTO):
+    occurrence_id: int
+    tournament_id: int
+    source_file_id: int
+    source_game_index: int
+    raw_headers: dict[str, str]
+    raw_pgn_object_key: str | None
+    source_name: str
+    source_priority: int
+    source_file_sha256: str
+    source_url: str | None
+
+    _ALIASES = {"id": "occurrence_id", "provider": "source_name"}
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "occurrence_id": self.occurrence_id,
+            "tournament_id": self.tournament_id,
+            "source_file_id": self.source_file_id,
+            "source_game_index": self.source_game_index,
+            "raw_headers": dict(self.raw_headers),
+            "raw_pgn_object_key": self.raw_pgn_object_key,
+            "source_name": self.source_name,
+            "source_priority": self.source_priority,
+            "source_file_sha256": self.source_file_sha256,
+            "source_url": self.source_url,
+        }
+
+
+@dataclass(frozen=True)
+class RevisionGame(_MappingDTO):
+    canonical_game_id: int
+    fingerprint_version: str
+    fingerprint: str
+    ordinal: int
+    variant: str
+    initial_fen: str
+    mainline_uci: tuple[str, ...]
+    ply_count: int
+    canonical_headers: dict[str, str]
+    selected_headers: dict[str, str]
+    selected_occurrence_id: int | None
+    occurrences: tuple[RevisionGameOccurrence, ...] = ()
+
+    _ALIASES = {
+        "id": "canonical_game_id",
+        "canonical_game_fingerprint": "fingerprint",
+        "headers": "selected_headers",
+    }
+
+    @property
+    def game_id(self) -> int:
+        return self.canonical_game_id
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "canonical_game_id": self.canonical_game_id,
+            "fingerprint_version": self.fingerprint_version,
+            "fingerprint": self.fingerprint,
+            "ordinal": self.ordinal,
+            "variant": self.variant,
+            "initial_fen": self.initial_fen,
+            "mainline_uci": list(self.mainline_uci),
+            "ply_count": self.ply_count,
+            "canonical_headers": dict(self.canonical_headers),
+            "selected_headers": dict(self.selected_headers),
+            "selected_occurrence_id": self.selected_occurrence_id,
+            "occurrences": [occurrence.to_dict() for occurrence in self.occurrences],
+        }
+
+
+@dataclass(frozen=True)
+class RevisionPackageSource(_MappingDTO):
+    """Complete, plain-data input required by the B2b packager."""
+
+    tournament_id: str
+    registry_tournament_id: int
+    name: str
+    site: str | None
+    country: str | None
+    start_date: str | None
+    end_date: str | None
+    time_control_class: str | None
+    is_otb: bool | None
+    has_vietnamese_player: bool | None
+    priority_score: int
+    priority_reasons: tuple[object, ...]
+    state: str
+    revision_id: int
+    revision_number: int
+    canonical_sha256: str
+    canonicalization_policy: str
+    created_at: str
+    sources: tuple[RevisionSource, ...]
+    games: tuple[RevisionGame, ...]
+
+    _ALIASES = {
+        "slug": "tournament_id",
+        "tournament_name": "name",
+        "status": "state",
+        "revision": "revision_number",
+        "canonical_pgn_sha256": "canonical_sha256",
+        "source_provenance": "sources",
+        "canonical_games": "games",
+        "game_membership": "games",
+    }
+
+    @property
+    def tournament_name(self) -> str:
+        return self.name
+
+    @property
+    def status(self) -> str:
+        return self.state
+
+    @property
+    def revision(self) -> int:
+        return self.revision_number
+
+    @property
+    def canonical_pgn_sha256(self) -> str:
+        return self.canonical_sha256
+
+    @property
+    def source_provenance(self) -> tuple[RevisionSource, ...]:
+        return self.sources
+
+    @property
+    def canonical_games(self) -> tuple[RevisionGame, ...]:
+        return self.games
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "tournament_id": self.tournament_id,
+            "registry_tournament_id": self.registry_tournament_id,
+            "name": self.name,
+            "site": self.site,
+            "country": self.country,
+            "start_date": self.start_date,
+            "end_date": self.end_date,
+            "time_control_class": self.time_control_class,
+            "is_otb": self.is_otb,
+            "has_vietnamese_player": self.has_vietnamese_player,
+            "priority_score": self.priority_score,
+            "priority_reasons": list(self.priority_reasons),
+            "state": self.state,
+            "revision_id": self.revision_id,
+            "revision_number": self.revision_number,
+            "canonical_sha256": self.canonical_sha256,
+            "canonicalization_policy": self.canonicalization_policy,
+            "created_at": self.created_at,
+            "sources": [source.to_dict() for source in self.sources],
+            "games": [game.to_dict() for game in self.games],
+        }
 
 
 class Registry:
@@ -1464,6 +1714,309 @@ class Registry:
 
     def get_revision_membership(self, revision_id: int) -> list[dict[str, object]]:
         return self.get_revision_games(revision_id)
+
+    def _resolve_tournament_reference(
+        self,
+        connection: sqlite3.Connection,
+        tournament_id: str | int,
+    ) -> sqlite3.Row:
+        """Resolve a public slug (or an internal integer id) to one row."""
+        row: sqlite3.Row | None = None
+        if isinstance(tournament_id, str):
+            if not tournament_id:
+                raise ValueError("tournament id must not be empty")
+            row = connection.execute(
+                "SELECT * FROM tournaments WHERE slug = ?", (tournament_id,)
+            ).fetchone()
+            if row is None and tournament_id.isdigit():
+                row = connection.execute(
+                    "SELECT * FROM tournaments WHERE id = ?",
+                    (int(tournament_id),),
+                ).fetchone()
+        elif isinstance(tournament_id, int) and not isinstance(tournament_id, bool):
+            row = connection.execute(
+                "SELECT * FROM tournaments WHERE id = ?", (int(tournament_id),)
+            ).fetchone()
+        else:
+            raise TypeError("tournament id must be a slug or integer id")
+        if row is None:
+            raise KeyError(f"unknown tournament: {tournament_id}")
+        return row
+
+    def get_revision_for_packaging(
+        self,
+        tournament_id: str | int,
+        revision_number: int | None = None,
+    ) -> RevisionPackageSource:
+        """Return an ordered, SQLite-independent DTO for deterministic packaging."""
+        if revision_number is not None and int(revision_number) < 1:
+            raise ValueError("revision_number must be positive")
+
+        with self._connect() as connection:
+            tournament = self._resolve_tournament_reference(connection, tournament_id)
+            revision_query = """
+                SELECT tr.id AS revision_id, tr.tournament_id,
+                       tr.revision_number, tr.canonical_sha256,
+                       tr.canonicalization_policy, tr.created_at
+                FROM tournament_revisions AS tr
+                WHERE tr.tournament_id = ?
+            """
+            parameters: tuple[object, ...] = (int(tournament["id"]),)
+            if revision_number is not None:
+                revision_query += " AND tr.revision_number = ?"
+                parameters += (int(revision_number),)
+            revision_query += " ORDER BY tr.revision_number DESC, tr.id DESC LIMIT 1"
+            revision = connection.execute(revision_query, parameters).fetchone()
+            if revision is None:
+                requested = "latest" if revision_number is None else str(revision_number)
+                raise KeyError(
+                    f"unknown revision {requested} for tournament {tournament['slug']}"
+                )
+
+            source_rows = connection.execute(
+                """
+                SELECT st.id AS source_tournament_id, st.external_id,
+                       st.source_url, st.pgn_url, st.discovered_at,
+                       st.last_seen_at, s.name AS provider
+                FROM source_tournaments AS st
+                JOIN sources AS s ON s.id = st.source_id
+                WHERE st.tournament_id = ?
+                ORDER BY s.name, st.external_id, st.id
+                """,
+                (int(tournament["id"]),),
+            ).fetchall()
+            sources: list[RevisionSource] = []
+            for source_row in source_rows:
+                file_rows = connection.execute(
+                    """
+                    SELECT id AS source_file_id, object_key, filename, sha256,
+                           byte_size, content_type, status, downloaded_at,
+                           source_url
+                    FROM source_files
+                    WHERE source_tournament_id = ?
+                    ORDER BY id
+                    """,
+                    (int(source_row["source_tournament_id"]),),
+                ).fetchall()
+                files = tuple(
+                    RevisionSourceFile(
+                        source_file_id=int(file_row["source_file_id"]),
+                        object_key=str(file_row["object_key"]),
+                        filename=file_row["filename"],
+                        sha256=str(file_row["sha256"]),
+                        byte_size=int(file_row["byte_size"]),
+                        content_type=file_row["content_type"],
+                        status=str(file_row["status"]),
+                        downloaded_at=file_row["downloaded_at"],
+                        source_url=file_row["source_url"],
+                    )
+                    for file_row in file_rows
+                )
+                sources.append(
+                    RevisionSource(
+                        source_tournament_id=int(source_row["source_tournament_id"]),
+                        provider=str(source_row["provider"]),
+                        external_id=str(source_row["external_id"]),
+                        source_url=source_row["source_url"],
+                        pgn_url=source_row["pgn_url"],
+                        discovered_at=source_row["discovered_at"],
+                        last_seen_at=source_row["last_seen_at"],
+                        files=files,
+                    )
+                )
+
+            game_rows = connection.execute(
+                """
+                SELECT tg.canonical_game_id, tg.ordinal,
+                       tg.selected_occurrence_id,
+                       cg.fingerprint_version, cg.fingerprint, cg.variant,
+                       cg.initial_fen, cg.mainline_uci, cg.ply_count,
+                       cg.canonical_headers_json,
+                       selected_occurrence.raw_headers_json AS selected_raw_headers
+                FROM tournament_games AS tg
+                JOIN canonical_games AS cg
+                  ON cg.id = tg.canonical_game_id
+                LEFT JOIN game_occurrences AS selected_occurrence
+                  ON selected_occurrence.id = tg.selected_occurrence_id
+                WHERE tg.revision_id = ?
+                ORDER BY tg.ordinal, tg.canonical_game_id
+                """,
+                (int(revision["revision_id"]),),
+            ).fetchall()
+            games: list[RevisionGame] = []
+            for game_row in game_rows:
+                try:
+                    parsed_moves = json.loads(str(game_row["mainline_uci"]))
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        "stored canonical game mainline is not valid JSON"
+                    ) from exc
+                if not isinstance(parsed_moves, list):
+                    raise ValueError("stored canonical game mainline must be a JSON array")
+                canonical_headers = _json_object(
+                    game_row["canonical_headers_json"],
+                    label="canonical headers",
+                )
+                selected_headers = canonical_headers
+                if game_row["selected_raw_headers"] is not None:
+                    selected_headers = _json_object(
+                        game_row["selected_raw_headers"],
+                        label="selected occurrence headers",
+                    )
+
+                occurrence_rows = connection.execute(
+                    """
+                    SELECT go.id AS occurrence_id, go.tournament_id,
+                           go.source_file_id, go.source_game_index,
+                           go.raw_headers_json, go.raw_pgn_object_key,
+                           s.name AS source_name, s.priority AS source_priority,
+                           sf.sha256 AS source_file_sha256,
+                           sf.source_url
+                    FROM game_occurrences AS go
+                    JOIN source_files AS sf ON sf.id = go.source_file_id
+                    JOIN sources AS s ON s.id = sf.source_id
+                    WHERE go.canonical_game_id = ? AND go.is_valid = 1
+                    ORDER BY s.priority DESC, s.name ASC, sf.sha256 ASC,
+                             go.source_game_index ASC, go.id ASC
+                    """,
+                    (int(game_row["canonical_game_id"]),),
+                ).fetchall()
+                occurrences = tuple(
+                    RevisionGameOccurrence(
+                        occurrence_id=int(occurrence_row["occurrence_id"]),
+                        tournament_id=int(occurrence_row["tournament_id"]),
+                        source_file_id=int(occurrence_row["source_file_id"]),
+                        source_game_index=int(occurrence_row["source_game_index"]),
+                        raw_headers=_json_object(
+                            occurrence_row["raw_headers_json"],
+                            label="occurrence headers",
+                        ),
+                        raw_pgn_object_key=occurrence_row["raw_pgn_object_key"],
+                        source_name=str(occurrence_row["source_name"]),
+                        source_priority=int(occurrence_row["source_priority"]),
+                        source_file_sha256=str(occurrence_row["source_file_sha256"]),
+                        source_url=occurrence_row["source_url"],
+                    )
+                    for occurrence_row in occurrence_rows
+                )
+                games.append(
+                    RevisionGame(
+                        canonical_game_id=int(game_row["canonical_game_id"]),
+                        fingerprint_version=str(game_row["fingerprint_version"]),
+                        fingerprint=str(game_row["fingerprint"]),
+                        ordinal=int(game_row["ordinal"]),
+                        variant=str(game_row["variant"]),
+                        initial_fen=str(game_row["initial_fen"]),
+                        mainline_uci=tuple(str(move) for move in parsed_moves),
+                        ply_count=int(game_row["ply_count"]),
+                        canonical_headers={
+                            str(key): str(value)
+                            for key, value in canonical_headers.items()
+                        },
+                        selected_headers={
+                            str(key): str(value)
+                            for key, value in selected_headers.items()
+                        },
+                        selected_occurrence_id=(
+                            None
+                            if game_row["selected_occurrence_id"] is None
+                            else int(game_row["selected_occurrence_id"])
+                        ),
+                        occurrences=occurrences,
+                    )
+                )
+
+            try:
+                priority_reasons = json.loads(
+                    str(tournament["priority_reasons_json"])
+                )
+            except json.JSONDecodeError as exc:
+                raise ValueError("stored tournament priority reasons are invalid") from exc
+            if not isinstance(priority_reasons, list):
+                raise ValueError("stored tournament priority reasons must be a JSON array")
+
+            def optional_bool(value: object) -> bool | None:
+                return None if value is None else bool(int(value))
+
+            return RevisionPackageSource(
+                tournament_id=str(tournament["slug"]),
+                registry_tournament_id=int(tournament["id"]),
+                name=str(tournament["name"] or tournament["slug"]),
+                site=tournament["site"],
+                country=tournament["country"],
+                start_date=tournament["start_date"],
+                end_date=tournament["end_date"],
+                time_control_class=tournament["time_control_class"],
+                is_otb=optional_bool(tournament["is_otb"]),
+                has_vietnamese_player=optional_bool(
+                    tournament["has_vietnamese_player"]
+                ),
+                priority_score=int(tournament["priority_score"]),
+                priority_reasons=tuple(priority_reasons),
+                state=_state(str(tournament["status"])),
+                revision_id=int(revision["revision_id"]),
+                revision_number=int(revision["revision_number"]),
+                canonical_sha256=str(revision["canonical_sha256"]),
+                canonicalization_policy=str(revision["canonicalization_policy"]),
+                created_at=str(revision["created_at"]),
+                sources=tuple(sources),
+                games=tuple(games),
+            )
+
+    def _revision_belongs_to_tournament(
+        self,
+        connection: sqlite3.Connection,
+        tournament_id: str | int,
+        revision_id: int,
+    ) -> sqlite3.Row:
+        tournament = self._resolve_tournament_reference(connection, tournament_id)
+        revision = connection.execute(
+            "SELECT * FROM tournament_revisions WHERE id = ?",
+            (int(revision_id),),
+        ).fetchone()
+        if revision is None:
+            raise KeyError(f"unknown tournament revision id: {revision_id}")
+        if int(revision["tournament_id"]) != int(tournament["id"]):
+            raise ValueError("revision does not belong to tournament")
+        return tournament
+
+    def mark_sharded(self, tournament_id: str | int, revision_id: int) -> None:
+        """Advance one canonicalized tournament to SHARDED, monotonically."""
+        now = _timestamp()
+        with self._connect() as connection:
+            tournament = self._revision_belongs_to_tournament(
+                connection, tournament_id, revision_id
+            )
+            current = _state(str(tournament["status"]))
+            if current == "CANONICALIZED":
+                connection.execute(
+                    "UPDATE tournaments SET status = ?, updated_at = ? WHERE id = ?",
+                    ("SHARDED", now, int(tournament["id"])),
+                )
+                return
+            if current == "SHARDED":
+                return
+            raise ValueError(
+                "mark_sharded requires tournament state CANONICALIZED or SHARDED"
+            )
+
+    def mark_ready(self, tournament_id: str | int, revision_id: int) -> None:
+        """Advance one sharded tournament to READY, monotonically."""
+        now = _timestamp()
+        with self._connect() as connection:
+            tournament = self._revision_belongs_to_tournament(
+                connection, tournament_id, revision_id
+            )
+            current = _state(str(tournament["status"]))
+            if current == "READY":
+                return
+            if current == "SHARDED":
+                connection.execute(
+                    "UPDATE tournaments SET status = ?, updated_at = ? WHERE id = ?",
+                    ("READY", now, int(tournament["id"])),
+                )
+                return
+            raise ValueError("mark_ready requires tournament state SHARDED or READY")
 
     def registry_counts(self) -> dict[str, int]:
         """Return row counts for every B2a registry table."""
