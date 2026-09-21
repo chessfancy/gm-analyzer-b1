@@ -1,0 +1,23 @@
+{
+  "event_id": "samarkand-2026",
+  "title": "Chess Olympiad Samarkand 2026",
+  "broadcast": true,
+  "otb": true,
+  "games": [
+    {
+      "event_id": "samarkand-2026",
+      "game_id": "open-r1-board1",
+      "title": "Open Round 1 Board 1",
+      "source_url": "https://chesscom.test/broadcast/samarkand-2026/games/open-r1-board1",
+      "pgn_url": "https://chesscom.test/broadcast/samarkand-2026/games/open-r1-board1.pgn",
+      "otb": true
+    },
+    {
+      "event_id": "samarkand-2026",
+      "game_id": "online-game-1",
+      "title": "Online archive game",
+      "source_url": "https://chesscom.test/games/archive/online-game-1",
+      "online": true
+    }
+  ]
+}

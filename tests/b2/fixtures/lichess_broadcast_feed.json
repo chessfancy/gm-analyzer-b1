@@ -1,0 +1,44 @@
+{
+  "broadcast_id": "samarkand-2026",
+  "title": "46th FIDE Chess Olympiad Samarkand 2026",
+  "events": [
+    {
+      "event_id": "open",
+      "title": "46th FIDE Chess Olympiad Samarkand 2026 - Open",
+      "otb": true,
+      "rounds": [
+        {
+          "round_id": "round-1",
+          "title": "Round 1",
+          "source_url": "https://lichess.test/broadcast/samarkand-2026/open/round-1",
+          "pgn_url": "https://lichess.test/api/broadcast/round/round-1.pgn?broadcast=samarkand-2026&event=open"
+        }
+      ]
+    },
+    {
+      "event_id": "women",
+      "title": "46th FIDE Chess Olympiad Samarkand 2026 - Women",
+      "otb": true,
+      "rounds": [
+        {
+          "round_id": "round-1",
+          "title": "Round 1",
+          "source_url": "https://lichess.test/broadcast/samarkand-2026/women/round-1",
+          "pgn_url": "https://lichess.test/api/broadcast/round/round-1.pgn?broadcast=samarkand-2026&event=women"
+        }
+      ]
+    },
+    {
+      "event_id": "online-practice",
+      "title": "Online practice broadcast",
+      "online": true,
+      "rounds": [
+        {
+          "round_id": "round-1",
+          "source_url": "https://lichess.test/broadcast/samarkand-2026/online-practice/round-1",
+          "pgn_url": "https://lichess.test/api/broadcast/round/round-1.pgn?broadcast=samarkand-2026&event=online-practice"
+        }
+      ]
+    }
+  ]
+}

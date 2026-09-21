@@ -12,8 +12,11 @@ from typing import Sequence
 from .acquisition import AcquisitionResult, AcquisitionService
 from .registry import Registry
 from .sources.base import SourceAdapter
+from .sources.chesscom_broadcast import ChessComBroadcastAdapter
 from .sources.chess_results import ChessResultsAdapter
+from .sources.lichess_broadcast import LichessBroadcastAdapter
 from .storage import LocalObjectStore
+from .sources.twic import TwicAdapter
 
 
 DEFAULT_REGISTRY_PATH = ".cgm/registry.sqlite"
@@ -25,12 +28,18 @@ PROGRAM = "cgm-acquire"
 
 def build_adapters() -> dict[str, SourceAdapter]:
     """Construct the adapter registry used by the CLI boundary."""
-    return {"chess-results": ChessResultsAdapter()}
+    return {
+        "chess-results": ChessResultsAdapter(),
+        "lichess-broadcast": LichessBroadcastAdapter(),
+        "chesscom-broadcast": ChessComBroadcastAdapter(),
+        "twic": TwicAdapter(),
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=PROGRAM,
+        formatter_class=argparse.RawTextHelpFormatter,
         description=(
             "Acquire one B2 chess source reference and canonicalize it into "
             "the local registry. Prints one JSON object on stdout."
@@ -39,7 +48,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "source",
         metavar="SOURCE",
-        help="Chess-Results tnrNNNN reference or a supported absolute URL.",
+        help=(
+            "Provider reference or supported URL: Chess-Results tnrNNNN, "
+            "Lichess/Chess.com OTB broadcast feed or game, or TWIC issue 1660+. "
+            "Adapters: chess-results, lichess-broadcast, chesscom-broadcast, twic."
+        ),
     )
     parser.add_argument(
         "--registry",
