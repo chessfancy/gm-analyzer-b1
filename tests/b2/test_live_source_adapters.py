@@ -512,13 +512,17 @@ def test_chesscom_html_success_body_is_not_installed(tmp_path):
 
 def test_twic_discovers_archive_pgn_and_preserves_issue_provenance(tmp_path):
     pgn = _fixture("chess_results_games.pgn")
+    archive = BytesIO()
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as output:
+        output.writestr("twic1660.pgn", pgn)
+    archive_bytes = archive.getvalue()
     opener = FixtureOpener(
         {
             ("GET", "/html/twic1660.html"): lambda request: _response(
                 _fixture("twic1660.html"), request.full_url
             ),
-            ("GET", "/assets/files/pgn/twic1660.pgn"): lambda request: _response(
-                pgn, request.full_url, headers={"Content-Type": "text/plain"}
+            ("GET", "/zips/twic1660g.zip"): lambda request: _response(
+                archive_bytes, request.full_url, headers={"Content-Type": "application/zip"}
             ),
         }
     )
@@ -531,12 +535,70 @@ def test_twic_discovers_archive_pgn_and_preserves_issue_provenance(tmp_path):
 
     assert ref == SourceRef("twic", "twic1660", TWIC_ARCHIVE_URL)
     assert descriptor.title == "The Week in Chess 1660"
-    assert descriptor.pgn_url == "https://twic.test/assets/files/pgn/twic1660.pgn"
+    assert descriptor.pgn_url == "https://twic.test/zips/twic1660g.zip"
     assert destination.read_bytes() == pgn
     assert [record["path"] for record in opener.request_records] == [
         "/html/twic1660.html",
-        "/assets/files/pgn/twic1660.pgn",
+        "/zips/twic1660g.zip",
     ]
+
+
+def test_twic_retries_deterministic_zip_once_after_http_406(tmp_path):
+    pgn = _fixture("chess_results_games.pgn")
+    archive = BytesIO()
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as output:
+        output.writestr("twic1660.pgn", pgn)
+    archive_bytes = archive.getvalue()
+    zip_attempts = 0
+
+    def zip_response(request):
+        nonlocal zip_attempts
+        zip_attempts += 1
+        if zip_attempts == 1:
+            return _response(b"", request.full_url, status=406)
+        return _response(
+            archive_bytes,
+            request.full_url,
+            headers={"Content-Type": "application/zip"},
+        )
+
+    opener = FixtureOpener(
+        {
+            ("GET", "/html/twic1660.html"): lambda request: _response(
+                _fixture("twic1660.html"), request.full_url
+            ),
+            ("GET", "/zips/twic1660g.zip"): zip_response,
+        }
+    )
+    adapter = TwicAdapter(base_url="https://twic.test", opener=opener)
+    ref = adapter.discover("twic1660")[0]
+    destination = tmp_path / "twic1660.pgn"
+
+    adapter.download_pgn(ref, destination)
+
+    assert destination.read_bytes() == pgn
+    assert zip_attempts == 2
+    assert [record["path"] for record in opener.request_records] == [
+        "/html/twic1660.html",
+        "/zips/twic1660g.zip",
+        "/html/twic1660.html",
+        "/zips/twic1660g.zip",
+    ]
+
+
+def test_twic_describe_keeps_deterministic_zip_when_metadata_times_out():
+    opener = FixtureOpener(
+        {
+            ("GET", "/html/twic1660.html"): RuntimeError("metadata timed out"),
+        }
+    )
+    adapter = TwicAdapter(base_url="https://twic.test", opener=opener)
+    ref = adapter.discover("twic1660")[0]
+
+    descriptor = adapter.describe(ref)
+
+    assert descriptor.pgn_url == "https://twic.test/zips/twic1660g.zip"
+    assert descriptor.title == "The Week in Chess 1660"
 
 
 @pytest.mark.parametrize(
@@ -569,7 +631,7 @@ def test_twic_rejects_issue_mismatch_and_html_download(tmp_path):
 
     html_opener = FixtureOpener(
         {
-            ("GET", "/assets/files/pgn/twic1660.pgn"): lambda request: _response(
+            ("GET", "/zips/twic1660g.zip"): lambda request: _response(
                 b"<html><body>blocked</body></html>",
                 request.full_url,
                 headers={"Content-Type": "text/html"},
@@ -595,7 +657,7 @@ def test_twic_downloads_pgn_from_a_zip_archive_without_parsing_games(tmp_path):
     archive_bytes = archive.getvalue()
     opener = FixtureOpener(
         {
-            ("GET", "/assets/files/cbv/twic1660.zip"): lambda request: _response(
+            ("GET", "/zips/twic1660g.zip"): lambda request: _response(
                 archive_bytes,
                 request.full_url,
                 headers={"Content-Type": "application/zip"},

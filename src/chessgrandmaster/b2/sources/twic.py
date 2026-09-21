@@ -27,7 +27,6 @@ from ._common import (
     response_header,
     response_status,
     same_origin,
-    stream_download,
 )
 from .base import SourceDescriptor, SourceRef
 
@@ -175,6 +174,9 @@ class TwicAdapter:
     def _archive_url(self, issue: int) -> str:
         return f"{self.base_url}/html/twic{issue}.html"
 
+    def _pgn_zip_url(self, issue: int) -> str:
+        return f"{self.base_url}/zips/twic{issue}g.zip"
+
     def _validate_source_url(self, source_url: str) -> str:
         approved_url(source_url, self.allowed_hosts, "TWIC source URL")
         return source_url
@@ -248,44 +250,60 @@ class TwicAdapter:
 
     def describe(self, ref: SourceRef) -> SourceDescriptor:
         issue = self._validate_ref(ref)
+        deterministic_pgn_url = self._pgn_zip_url(issue)
         path = urlparse(ref.source_url).path.casefold()
         if self._is_file_url(ref.source_url):
             record = {
                 "issue": issue,
                 "source_url": ref.source_url,
-                "pgn_url": ref.source_url,
+                "pgn_url": deterministic_pgn_url,
                 "title": f"The Week in Chess {issue}",
                 "text": "",
             }
             self._records[f"twic{issue}"] = record
         else:
-            fetched = fetch_body(
-                self.opener,
-                ref.source_url,
-                timeout=self.timeout_sec,
-                allowed_hosts=self.allowed_hosts,
-                user_agent=USER_AGENT,
-                provider="TWIC",
-            )
-            text = object_text(fetched.body)
-            parser = _ArchiveParser()
             try:
-                parser.feed(text)
-                parser.close()
-                parser.finish()
-            except Exception as exc:
-                raise RuntimeError("TWIC archive page is malformed") from exc
-            text_issue = _issue_from_text(" ".join([parser.title or "", *parser.headings, text]))
-            if text_issue is not None and text_issue != issue:
-                raise ValueError("TWIC archive page issue does not match source ref")
-            links = self._links(fetched.url, parser, issue)
-            if not links:
-                # Current TWIC pages sometimes render the download control
-                # outside the HTML anchor parser can see.  The canonical
-                # issue archive URL remains deterministic and same-origin.
-                links = [f"{self.base_url}/zips/twic{issue}g.zip"]
-            self._cache(issue, ref.source_url, links[0], title=parser.title, text=text)
-            record = self._records[f"twic{issue}"]
+                fetched = fetch_body(
+                    self.opener,
+                    ref.source_url,
+                    timeout=self.timeout_sec,
+                    allowed_hosts=self.allowed_hosts,
+                    user_agent=USER_AGENT,
+                    provider="TWIC",
+                )
+            except RuntimeError:
+                # HTML is optional metadata; the deterministic ZIP remains
+                # available when the archive page is temporarily unavailable.
+                record = {
+                    "issue": issue,
+                    "source_url": ref.source_url,
+                    "pgn_url": deterministic_pgn_url,
+                    "title": f"The Week in Chess {issue}",
+                    "text": "",
+                }
+                self._records[f"twic{issue}"] = record
+            else:
+                text = object_text(fetched.body)
+                parser = _ArchiveParser()
+                try:
+                    parser.feed(text)
+                    parser.close()
+                    parser.finish()
+                except Exception as exc:
+                    raise RuntimeError("TWIC archive page is malformed") from exc
+                text_issue = _issue_from_text(" ".join([parser.title or "", *parser.headings, text]))
+                if text_issue is not None and text_issue != issue:
+                    raise ValueError("TWIC archive page issue does not match source ref")
+                # The canonical ZIP URL is deterministic; HTML links are optional
+                # metadata and must not select a different download contract.
+                self._cache(
+                    issue,
+                    ref.source_url,
+                    deterministic_pgn_url,
+                    title=parser.title,
+                    text=text,
+                )
+                record = self._records[f"twic{issue}"]
         text = str(record.get("text", ""))
         lower_text = text.casefold()
         control = None
@@ -309,6 +327,25 @@ class TwicAdapter:
             return record
         self.describe(ref)
         return self._records[f"twic{issue}"]
+
+    def _warm_up_archive_index(self, issue: int) -> None:
+        try:
+            fetch_body(
+                self.opener,
+                self._archive_url(issue),
+                timeout=self.timeout_sec,
+                allowed_hosts=self.allowed_hosts,
+                user_agent=USER_AGENT,
+                provider="TWIC",
+            )
+        except RuntimeError:
+            # The warm-up is bounded and only primes provider-side filtering;
+            # the deterministic ZIP retry remains the authoritative operation.
+            pass
+
+    @staticmethod
+    def _is_http_406(error: RuntimeError) -> bool:
+        return bool(re.search(r"\b406\b", str(error)))
 
     def _download_archive(self, url: str, destination: Path, issue: int) -> ResponseSnapshot:
         destination = Path(destination).expanduser()
@@ -358,7 +395,7 @@ class TwicAdapter:
                     raise RuntimeError("TWIC response was HTML, not a PGN archive")
                 output.flush()
                 os.fsync(output.fileno())
-            if not zipfile.is_zipfile(archive_part):
+            if not bytes(prefix).startswith(b"PK") or not zipfile.is_zipfile(archive_part):
                 raise RuntimeError("TWIC response was not a PGN or ZIP archive")
             with zipfile.ZipFile(archive_part) as archive:
                 members = [
@@ -419,24 +456,16 @@ class TwicAdapter:
 
     def download_pgn(self, ref: SourceRef, destination: Path) -> Path:
         issue = self._validate_ref(ref)
-        record = self._record(ref, issue)
-        pgn_url = record["pgn_url"]
+        self._record(ref, issue)
+        pgn_url = self._pgn_zip_url(issue)
         same_origin(ref.source_url, pgn_url, self.allowed_hosts, "TWIC PGN URL")
-        if urlparse(pgn_url).path.casefold().endswith((".zip", ".cbv")):
+        try:
             snapshot = self._download_archive(pgn_url, Path(destination), issue)
-        else:
-            snapshot = stream_download(
-                self.opener,
-                pgn_url,
-                Path(destination),
-                timeout=self.timeout_sec,
-                allowed_hosts=self.allowed_hosts,
-                user_agent=USER_AGENT,
-                provider="TWIC",
-                validator=lambda prefix, content_type_value: ensure_pgn_signature(
-                    prefix, content_type_value, "TWIC"
-                ),
-            )
+        except RuntimeError as error:
+            if not self._is_http_406(error):
+                raise
+            self._warm_up_archive_index(issue)
+            snapshot = self._download_archive(pgn_url, Path(destination), issue)
         self.last_download_filename = snapshot.filename
         self.last_download_content_type = snapshot.content_type
         self.last_download_content_disposition = snapshot.content_disposition
