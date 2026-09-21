@@ -32,6 +32,29 @@ Bulk analysis should prefer:
 Oracle can run B1 when useful, especially for live Olympiad rounds, but
 its 2 OCPU should not be consumed as the default bulk engine farm.
 
+## Corpus authority and cutover
+
+The current authoritative production B2a corpus still lives on the
+Windows worktree. Do not let Windows and Oracle become concurrent writers
+to independent copies of the same 2026 registry.
+
+Use a one-time controlled cutover:
+
+1. finish/integrate the source/coordinator code on temporary registries;
+2. stop production fetch/process writes on Windows;
+3. copy the complete `.cgm/corpus-2026` registry + immutable objects to
+   Oracle;
+4. verify registry table counts, tournament states, object counts and
+   representative hashes on both sides;
+5. declare the Oracle copy authoritative;
+6. enable scheduled source ingestion/process work only on Oracle;
+7. retain the Windows copy as a read-only backup/inspection copy unless a
+   deliberate reverse cutover is performed.
+
+After cutover, all Chess-Results/Lichess/Chess.com/TWIC production writes
+must enter the Oracle canonical registry first. Workers never receive or
+write the canonical registry; they receive only immutable B2b job bundles.
+
 ## Phase 1: local coordinator, no S3 dependency
 
 S3 is explicitly deferred.
