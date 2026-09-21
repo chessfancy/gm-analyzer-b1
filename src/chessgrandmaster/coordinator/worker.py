@@ -53,10 +53,9 @@ def build_worker_command(
     resolved = get_provider_profile(profile)
     workdir_path = Path(workdir).resolve()
     input_path = workdir_path / "input.pgn"
-    output_dir = workdir_path / "outputs"
+    cgm_home = workdir_path / "cgm-home"
+    cgm_home.mkdir(parents=True, exist_ok=True)
     command = tuple(str(part) for part in engine_command) + (
-        "--platform-profile",
-        resolved.name,
         "--workers",
         str(resolved.workers),
         "--threads",
@@ -72,7 +71,7 @@ def build_worker_command(
         job_id=job_id,
         workdir=workdir_path,
         command=command,
-        environment={"CGM_WORKDIR": str(workdir_path), "CGM_OUTPUT_DIR": str(output_dir)},
+        environment={"CGM_HOME": str(cgm_home)},
     )
 
 

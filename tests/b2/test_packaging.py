@@ -8,6 +8,7 @@ from chessgrandmaster.b2.canonicalize import canonicalize_source_file
 from chessgrandmaster.b2.packaging import PackageService
 from chessgrandmaster.b2.registry import Registry
 from chessgrandmaster.b2.storage import LocalObjectStore
+from chessgrandmaster.coordinator import Coordinator, JobState, LocalWorker, write_checksums
 
 
 PGN = """[Event \"Fixture One\"]
@@ -170,3 +171,109 @@ def test_package_service_rejects_checksum_mismatch_before_ready(tmp_path):
     with pytest.raises(ValueError, match="canonical"):
         service.package("fixture-tournament")
     assert registry.get_tournament_status(tournament_id) == "CANONICALIZED"
+
+
+def test_package_output_round_trips_through_coordinator_and_local_worker(tmp_path):
+    registry, _tournament_id, _canonical = seed_packaging_fixture(tmp_path)
+    service = PackageService(
+        registry,
+        LocalObjectStore(tmp_path / "objects"),
+        tmp_path / "workspace",
+    )
+    package = service.package("fixture-tournament", target_plies=6)
+    shard = package.shards[0]
+
+    coordinator = Coordinator(
+        tmp_path / "coordinator.sqlite",
+        archive_root=tmp_path / "archive",
+    )
+    assert coordinator.register_job(shard.input_path.parent) == shard.job_id
+    lease = coordinator.lease_next("fixture-worker", "oracle-urgent")
+    assert lease is not None
+    exported = coordinator.export_job(shard.job_id, tmp_path / "exported")
+    command = LocalWorker("oracle-urgent", work_root=tmp_path / "workers").prepare(exported)
+    assert command.environment["CGM_HOME"] == str(command.workdir / "cgm-home")
+
+    job = json.loads((exported / "job.json").read_text(encoding="utf-8"))
+    result = tmp_path / "result"
+    result.mkdir()
+    result_payload = {
+        "schema_version": "cgm-job-result-1",
+        "job_id": job["job_id"],
+        "config_hash": job["config_hash"],
+        "tournament_id": job["tournament_id"],
+        "tournament_revision": job["tournament_revision"],
+        "shard_index": job["shard_index"],
+        "input": {
+            "key": job["input"]["key"],
+            "sha256": job["input"]["sha256"],
+        },
+    }
+    (result / "job-result.json").write_text(
+        json.dumps(result_payload, sort_keys=True), encoding="utf-8"
+    )
+    (result / "analysis.sqlite").write_bytes(b"SQLite fixture")
+    (result / "Mistakes.pgn").write_text("", encoding="utf-8")
+    (result / "Blunders.pgn").write_text("", encoding="utf-8")
+    (result / "raw-uci").mkdir()
+    (result / "raw-uci" / "game-0001.uci").write_text("bestmove e2e4\n", encoding="utf-8")
+    write_checksums(result)
+
+    receipt = coordinator.import_result(result)
+
+    assert receipt.job_id == shard.job_id
+    assert coordinator.get_job(shard.job_id).state is JobState.COMPLETED
+    assert (receipt.archive_path / "job-result.json").is_file()
+
+
+def test_packaging_rejects_explicit_older_revision_before_state_advance(tmp_path):
+    registry, tournament_id, _canonical = seed_packaging_fixture(tmp_path)
+    source_id = registry.upsert_source("fixture-second", "https://example.invalid/second", priority=9)
+    source_tournament_id = registry.upsert_source_tournament(
+        source_id=source_id,
+        tournament_id=tournament_id,
+        external_id="fixture-2",
+        source_url="https://example.invalid/fixture-2",
+        pgn_url="https://example.invalid/fixture-2.pgn",
+    )
+    raw_path = tmp_path / "fixture-second.pgn"
+    raw_path.write_text(
+        PGN
+        + "\n[Event \"Fixture Five Revision Two\"]\n[Site \"Test\"]\n[Date \"2026.09.21\"]\n[Round \"5\"]\n[White \"White Five\"]\n[Black \"Black Five\"]\n[Result \"1-0\"]\n\n1. e4 c5 2. Nf3 d6 1-0\n",
+        encoding="utf-8",
+    )
+    raw_bytes = raw_path.read_bytes()
+    source_file_id = registry.record_source_file(
+        source_tournament_id=source_tournament_id,
+        object_key="raw/fixture-second/original.pgn",
+        filename=raw_path.name,
+        sha256=hashlib.sha256(raw_bytes).hexdigest(),
+        byte_size=len(raw_bytes),
+        content_type="application/x-chess-pgn",
+    )
+    canonicalize_source_file(
+        registry,
+        tournament_id,
+        source_file_id,
+        raw_path,
+        tmp_path / "canonical-second.pgn",
+    )
+    registry.upsert_tournament(
+        "fixture-tournament",
+        name="Fixture Tournament",
+        site="https://example.invalid/fixture",
+        time_control_class="classical",
+        is_otb=True,
+        has_vietnamese_player=False,
+        priority_score=10,
+        priority_reasons=["fixture"],
+        status="CANONICALIZED",
+    )
+
+    service = PackageService(
+        registry,
+        LocalObjectStore(tmp_path / "objects"),
+        tmp_path / "workspace",
+    )
+    with pytest.raises(ValueError, match="latest revision"):
+        service.package("fixture-tournament", revision_number=1)

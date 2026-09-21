@@ -193,6 +193,14 @@ def open_response(
 ):
     """Open one request while normalizing transport failures."""
     headers = {"User-Agent": user_agent}
+    if provider.casefold() == "twic":
+        headers.update(
+            {
+                "Accept": "application/zip,application/octet-stream,*/*",
+                "Accept-Encoding": "identity",
+                "Referer": "https://theweekinchess.com/",
+            }
+        )
     if method.upper() == "POST":
         headers["Content-Type"] = "application/x-www-form-urlencoded"
     request = Request(url, data=data, headers=headers, method=method.upper())

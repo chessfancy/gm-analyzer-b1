@@ -1,0 +1,26 @@
+{
+  "room": {
+    "id": 24873,
+    "slug": "2026-fide-chess-olympiad-open"
+  },
+  "rounds": [
+    {"id": 219728, "roomId": 24873, "slug": "01"}
+  ],
+  "games": [
+    {
+      "id": 5577100,
+      "roundId": 219728,
+      "roomId": 24873,
+      "site": "https://chesscom.test/events/2026-fide-chess-olympiad-open-live/01/Otsuka_Shou-Alfene_Ambdullah",
+      "sourceType": "full",
+      "white": {"name": "Otsuka Shou", "rating": 2500},
+      "black": {"name": "Alfene Ambdullah", "rating": 2400}
+    },
+    {
+      "id": 5584282,
+      "roundId": 219729,
+      "site": "Sarmarkand, Uzbekistan",
+      "sourceType": "game"
+    }
+  ]
+}

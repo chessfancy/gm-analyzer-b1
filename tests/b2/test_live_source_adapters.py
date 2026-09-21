@@ -217,10 +217,48 @@ def test_lichess_rejects_online_or_non_broadcast_queries_without_network():
     for query in (
         "https://lichess.test/api/games/user/alice",
         "https://lichess.test/game/abc123",
-        "https://lichess.test/broadcast/samarkand-2026/open",
     ):
         with pytest.raises(ValueError):
             adapter.discover(query)
+
+
+def test_lichess_html_root_and_event_feed_enumerate_round_and_download_pgn(tmp_path):
+    root_url = "https://lichess.test/broadcast/olympiad-2026/root-id"
+    round_url = "https://lichess.test/broadcast/olympiad-open/round-1/open-round-id"
+    pgn = _fixture("chess_results_games.pgn")
+    opener = FixtureOpener(
+        {
+            ("GET", "/broadcast/olympiad-2026/root-id"): lambda request: _response(
+                _fixture("lichess_broadcast_root.html"), request.full_url
+            ),
+            ("GET", "/broadcast/olympiad-open/open-event-id"): lambda request: _response(
+                _fixture("lichess_broadcast_event.html"), request.full_url
+            ),
+            ("GET", "/broadcast/olympiad-open/round-1/open-round-id"): lambda request: _response(
+                _fixture("lichess_broadcast_round.html"), request.full_url
+            ),
+            ("GET", "/api/broadcast/round/open-round-id.pgn"): lambda request: _response(
+                pgn, request.full_url, headers={"Content-Type": "text/plain"}
+            ),
+        }
+    )
+    adapter = LichessBroadcastAdapter(base_url="https://lichess.test", opener=opener)
+
+    refs = adapter.discover(root_url)
+    assert refs == [
+        SourceRef("lichess-broadcast", "broadcast:olympiad-open/event:round-1/round:open-round-id", round_url)
+    ]
+    descriptor = adapter.describe(refs[0])
+    destination = tmp_path / "round.pgn"
+    adapter.download_pgn(refs[0], destination)
+    assert descriptor.is_otb_hint is True
+    assert destination.read_bytes() == pgn
+    assert [record["path"] for record in opener.request_records] == [
+        "/broadcast/olympiad-2026/root-id",
+        "/broadcast/olympiad-open/open-event-id",
+        "/broadcast/olympiad-open/round-1/open-round-id",
+        "/api/broadcast/round/open-round-id.pgn",
+    ]
 
 
 def test_lichess_interrupted_download_is_atomic(tmp_path):
@@ -310,6 +348,51 @@ def test_chesscom_structured_broadcast_feed_requires_otb_event_and_game_identity
         )
     ]
     assert opener.request_records[0]["path"] == "/broadcast/samarkand-2026"
+
+
+def test_chesscom_event_page_uses_live_room_and_game_api_for_otb_pgn(tmp_path):
+    event_url = "https://chesscom.test/events/2026-fide-chess-olympiad-open/games"
+    game_url = (
+        "https://chesscom.test/events/2026-fide-chess-olympiad-open/01/"
+        "Otsuka_Shou-Alfene_Ambdullah"
+    )
+    opener = FixtureOpener(
+        {
+            ("GET", "/events/2026-fide-chess-olympiad-open/games"): lambda request: _response(
+                b"<html><body>event page</body></html>", request.full_url
+            ),
+            ("POST", "/events/v1/api/room/2026-fide-chess-olympiad-open"): lambda request: _response(
+                _fixture("chesscom_room.json"), request.full_url,
+                headers={"Content-Type": "application/json"},
+            ),
+            ("GET", "/events/2026-fide-chess-olympiad-open/01/Otsuka_Shou-Alfene_Ambdullah"): lambda request: _response(
+                b"<html><head><title>Olympiad OTB game</title></head><body>broadcast game</body></html>",
+                request.full_url,
+            ),
+            ("POST", "/events/v1/api/game/2026-fide-chess-olympiad-open/01/Otsuka_Shou-Alfene_Ambdullah"): lambda request: _response(
+                _fixture("chesscom_game.json"), request.full_url,
+                headers={"Content-Type": "application/json"},
+            ),
+        }
+    )
+    adapter = ChessComBroadcastAdapter(base_url="https://chesscom.test", opener=opener)
+
+    refs = adapter.discover(event_url)
+    assert refs == [SourceRef("chesscom-broadcast", "event:2026-fide-chess-olympiad-open/game:Otsuka_Shou-Alfene_Ambdullah", game_url)]
+    descriptor = adapter.describe(refs[0])
+    destination = tmp_path / "game.pgn"
+    adapter.download_pgn(refs[0], destination)
+
+    assert descriptor.is_otb_hint is True
+    assert descriptor.pgn_url.endswith("event=2026-fide-chess-olympiad-open&game=Otsuka_Shou-Alfene_Ambdullah")
+    assert [(record["method"], record["path"]) for record in opener.request_records] == [
+        ("GET", "/events/2026-fide-chess-olympiad-open/games"),
+        ("POST", "/events/v1/api/room/2026-fide-chess-olympiad-open"),
+        ("GET", "/events/2026-fide-chess-olympiad-open/01/Otsuka_Shou-Alfene_Ambdullah"),
+        ("POST", "/events/v1/api/game/2026-fide-chess-olympiad-open/01/Otsuka_Shou-Alfene_Ambdullah"),
+    ]
+    assert b'[White "Otsuka, Shou"]' in destination.read_bytes()
+    assert b"1. e4 c5 2. Nf3 Nc6 1-0" in destination.read_bytes()
 
 
 def test_chesscom_download_preserves_pgn_bytes_and_source_provenance(tmp_path):

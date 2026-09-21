@@ -135,12 +135,22 @@ def _load_and_verify_checksums(
     checksums_value = _load_json(checksum_path, "checksums.json", root)
     if not checksums_value:
         _fail("checksums.json must not be empty", root)
-    names = list(checksums_value)
+    if set(checksums_value) != {"schema_version", "files"}:
+        _fail(
+            "checksums.json must use the cgm-checksums-1 envelope",
+            root,
+        )
+    if checksums_value.get("schema_version") != "cgm-checksums-1":
+        _fail("checksums.json schema_version must be cgm-checksums-1", root)
+    files_value = checksums_value.get("files")
+    if not isinstance(files_value, dict) or not files_value:
+        _fail("checksums.json files must be a non-empty object", root)
+    names = list(files_value)
     if names != sorted(names):
-        _fail("checksums.json keys must be sorted", root)
+        _fail("checksums.json files keys must be sorted", root)
 
     checksums: dict[str, str] = {}
-    for name, digest in checksums_value.items():
+    for name, digest in files_value.items():
         safe_name = _safe_checksum_name(name, root)
         if safe_name == "checksums.json":
             _fail("checksums.json cannot checksum itself", root)
@@ -358,7 +368,15 @@ def validate_result_bundle(
     if not config_hash:
         _fail("job-result.json must contain a non-empty config_hash", root, job_id)
     identity = extract_input_identity(result)
-    identity_fields = {"input_sha256", "input_key", "shard_index", "shard_id", "canonical_game_fingerprints"}
+    identity_fields = {
+        "input_sha256",
+        "input_key",
+        "shard_index",
+        "shard_id",
+        "canonical_game_fingerprints",
+        "tournament_id",
+        "tournament_revision",
+    }
     if not identity_fields.intersection(identity):
         _fail("job-result.json must carry input/shard identity", root, job_id)
 
@@ -368,6 +386,8 @@ def validate_result_bundle(
             _fail(f"result job_id {job_id!r} does not match {expected_id!r}", root, job_id)
         if config_hash != expected_config:
             _fail("result config_hash does not match registered job", root, job_id)
+        if "input_sha256" not in identity:
+            _fail("job-result.json must carry input_sha256 for a registered job", root, job_id)
         for field in identity_fields:
             if field in identity and field in expected_identity:
                 if identity[field] != expected_identity[field]:
@@ -428,11 +448,12 @@ def compute_checksums(path: str | Path) -> dict[str, str]:
 
 
 def write_checksums(path: str | Path) -> dict[str, str]:
-    """Write the deterministic sorted checksum manifest and return its mapping."""
+    """Write the canonical cgm-checksums-1 envelope and return its mapping."""
 
     root = Path(path)
     checksums = compute_checksums(root)
-    (root / "checksums.json").write_bytes(canonical_json_bytes(checksums))
+    envelope = {"schema_version": "cgm-checksums-1", "files": checksums}
+    (root / "checksums.json").write_bytes(canonical_json_bytes(envelope))
     return checksums
 
 

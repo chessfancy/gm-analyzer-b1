@@ -1754,6 +1754,24 @@ class Registry:
 
         with self._connect() as connection:
             tournament = self._resolve_tournament_reference(connection, tournament_id)
+            latest_revision = connection.execute(
+                """
+                SELECT MAX(revision_number)
+                FROM tournament_revisions
+                WHERE tournament_id = ?
+                """,
+                (int(tournament["id"]),),
+            ).fetchone()[0]
+            if (
+                revision_number is not None
+                and latest_revision is not None
+                and int(revision_number) != int(latest_revision)
+                and _state(str(tournament["status"])) in {"CANONICALIZED", "SHARDED"}
+            ):
+                raise ValueError(
+                    "cannot package a non-latest revision while tournament state "
+                    "would advance; package the latest revision explicitly"
+                )
             revision_query = """
                 SELECT tr.id AS revision_id, tr.tournament_id,
                        tr.revision_number, tr.canonical_sha256,

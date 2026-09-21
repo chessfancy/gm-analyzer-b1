@@ -17,6 +17,7 @@ from chessgrandmaster.coordinator import (
     ProviderProfile,
     write_checksums,
 )
+from chessgrandmaster.cli import build_parser
 
 
 def make_job_bundle(root: Path, job_id: str = "job-a", *, config_hash: str = "cfg-a") -> Path:
@@ -254,6 +255,55 @@ def test_result_input_identity_mismatch_is_rejected(tmp_path: Path):
     assert list((tmp_path / "archive" / "rejected").iterdir())
 
 
+def test_checksums_use_the_canonical_nested_envelope(tmp_path: Path):
+    job = make_job_bundle(tmp_path / "job")
+
+    checksums = json.loads((job / "checksums.json").read_text(encoding="utf-8"))
+
+    assert checksums["schema_version"] == "cgm-checksums-1"
+    assert set(checksums) == {"schema_version", "files"}
+    assert set(checksums["files"]) == {"input.pgn", "job.json", "manifest.json"}
+    assert "input.pgn" not in checksums
+
+
+def test_registered_result_requires_input_sha256(tmp_path: Path):
+    coordinator = make_coordinator(tmp_path)
+    make_job_bundle(tmp_path / "job")
+    coordinator.register_job(tmp_path / "job")
+    coordinator.lease_next("worker-1", "kaggle")
+    coordinator.export_job("job-a", tmp_path / "exported")
+
+    result = make_result_bundle(tmp_path / "missing-input-sha")
+    payload = json.loads((result / "job-result.json").read_text(encoding="utf-8"))
+    del payload["input"]["sha256"]
+    (result / "job-result.json").write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    write_checksums(result)
+
+    with pytest.raises(BundleValidationError, match="input_sha256"):
+        coordinator.import_result(result)
+
+    assert coordinator.get_job("job-a").state is JobState.EXPORTED
+
+
+def test_registered_result_compares_carried_tournament_identity(tmp_path: Path):
+    coordinator = make_coordinator(tmp_path)
+    make_job_bundle(tmp_path / "job")
+    coordinator.register_job(tmp_path / "job")
+    coordinator.lease_next("worker-1", "kaggle")
+    coordinator.export_job("job-a", tmp_path / "exported")
+
+    result = make_result_bundle(tmp_path / "wrong-tournament")
+    payload = json.loads((result / "job-result.json").read_text(encoding="utf-8"))
+    payload["tournament_id"] = "different-tournament"
+    (result / "job-result.json").write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    write_checksums(result)
+
+    with pytest.raises(BundleValidationError, match="tournament_id"):
+        coordinator.import_result(result)
+
+    assert coordinator.get_job("job-a").state is JobState.EXPORTED
+
+
 def test_profiles_stay_outside_job_spec_and_oracle_is_secondary(tmp_path: Path):
     expected = {
         "kaggle": (4, 1, 1536),
@@ -303,7 +353,21 @@ def test_local_worker_materializes_without_invoking_provider(tmp_path: Path):
     assert "2" in command.command
     assert "--hash-mb" in command.command
     assert "1536" in command.command
+    assert "--platform-profile" not in command.command
+    assert command.environment == {"CGM_HOME": str(command.workdir / "cgm-home")}
     assert command.invoked is False
+
+
+def test_all_profile_commands_parse_with_the_current_cgm_analyze_cli(tmp_path: Path):
+    parser = build_parser()
+
+    for profile_name in ("kaggle", "deepnote", "molab-marimo", "codespaces", "oracle-urgent"):
+        safe_name = profile_name.replace("/", "-")
+        job = make_job_bundle(tmp_path / f"job-{safe_name}", job_id=f"job-{safe_name}")
+        command = LocalWorker(profile_name, work_root=tmp_path / "workers").prepare(job)
+
+        parser.parse_args(command.command[1:])
+        assert "--platform-profile" not in command.command
 
 
 def test_accepted_result_archive_does_not_write_canonical_registry(tmp_path: Path):

@@ -280,7 +280,10 @@ class TwicAdapter:
                 raise ValueError("TWIC archive page issue does not match source ref")
             links = self._links(fetched.url, parser, issue)
             if not links:
-                raise ValueError("TWIC archive exposes no same-origin PGN or archive link")
+                # Current TWIC pages sometimes render the download control
+                # outside the HTML anchor parser can see.  The canonical
+                # issue archive URL remains deterministic and same-origin.
+                links = [f"{self.base_url}/zips/twic{issue}g.zip"]
             self._cache(issue, ref.source_url, links[0], title=parser.title, text=text)
             record = self._records[f"twic{issue}"]
         text = str(record.get("text", ""))

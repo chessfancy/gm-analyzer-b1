@@ -279,6 +279,19 @@ class _TitleParser(HTMLParser):
         return value or None
 
 
+class _LinkParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.links: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.casefold() != "a":
+            return
+        href = dict(attrs).get("href")
+        if href:
+            self.links.append(href)
+
+
 class LichessBroadcastAdapter:
     """Acquire explicit OTB Lichess Broadcast rounds as immutable PGN bytes."""
 
@@ -369,6 +382,71 @@ class LichessBroadcastAdapter:
             refs.append(SourceRef(PROVIDER, identity.external_id, source_url))
         return refs
 
+    def _refs_from_html(self, body: bytes, page_url: str) -> list[SourceRef]:
+        """Enumerate rounds from public root/event Broadcast HTML pages."""
+        parser = _LinkParser()
+        parser.feed(object_text(body))
+        event_urls: list[str] = []
+        round_urls: list[str] = []
+        seen_urls: set[str] = set()
+        for href in parser.links:
+            candidate = urljoin(page_url, href)
+            if candidate in seen_urls:
+                continue
+            seen_urls.add(candidate)
+            try:
+                same_origin(page_url, candidate, self.allowed_hosts, "Lichess Broadcast link")
+            except ValueError:
+                continue
+            parts = [part for part in urlparse(candidate).path.split("/") if part]
+            if not parts or parts[0].casefold() != "broadcast":
+                continue
+            identity = _identity_from_url(candidate)
+            if identity is not None:
+                round_urls.append(candidate)
+            elif len(parts) == 3:
+                event_urls.append(candidate)
+
+        for event_url in event_urls[:64]:
+            try:
+                fetched = fetch_body(
+                    self.opener,
+                    event_url,
+                    timeout=self.timeout_sec,
+                    allowed_hosts=self.allowed_hosts,
+                    user_agent=USER_AGENT,
+                    provider="Lichess Broadcast",
+                )
+            except RuntimeError:
+                # A root page can contain a just-started/retired child event;
+                # one unavailable child must not hide healthy round feeds.
+                continue
+            nested = _LinkParser()
+            nested.feed(object_text(fetched.body))
+            for href in nested.links:
+                candidate = urljoin(fetched.url, href)
+                try:
+                    same_origin(fetched.url, candidate, self.allowed_hosts, "Lichess Broadcast link")
+                except ValueError:
+                    continue
+                identity = _identity_from_url(candidate)
+                if identity is not None:
+                    round_urls.append(candidate)
+            final_identity = _identity_from_url(fetched.url)
+            if final_identity is not None:
+                round_urls.append(fetched.url)
+
+        refs: list[SourceRef] = []
+        seen_external: set[str] = set()
+        for source_url in round_urls:
+            identity = _identity_from_url(source_url)
+            if identity is None or identity.external_id in seen_external:
+                continue
+            self._cache(identity, {"otb": True}, source_url)
+            seen_external.add(identity.external_id)
+            refs.append(SourceRef(PROVIDER, identity.external_id, source_url))
+        return refs
+
     def _explicit_query(self, query: str) -> tuple[_Identity, str] | None:
         if query.startswith("lichess-broadcast:"):
             tail = query.removeprefix("lichess-broadcast:")
@@ -419,12 +497,6 @@ class LichessBroadcastAdapter:
             raise ValueError(
                 "Lichess round URL must include broadcast, event, and round identity"
             )
-        if (
-            path_parts
-            and path_parts[0].casefold() == "broadcast"
-            and len(path_parts) == 3
-        ):
-            raise ValueError("Lichess broadcast URL does not identify a round")
         fetched = fetch_body(
             self.opener,
             query,
@@ -433,8 +505,14 @@ class LichessBroadcastAdapter:
             user_agent=USER_AGENT,
             provider="Lichess Broadcast",
         )
-        payload = parse_json_body(fetched.body, "Lichess Broadcast")
-        refs = self._refs_from_feed(payload, fetched.url)
+        try:
+            payload = parse_json_body(fetched.body, "Lichess Broadcast")
+        except ValueError:
+            if not looks_like_html(fetched.body):
+                raise
+            refs = self._refs_from_html(fetched.body, fetched.url)
+        else:
+            refs = self._refs_from_feed(payload, fetched.url)
         if not refs:
             raise ValueError("Lichess feed contained no OTB broadcast rounds")
         return refs

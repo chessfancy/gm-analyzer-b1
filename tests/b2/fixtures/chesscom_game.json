@@ -1,0 +1,18 @@
+{
+  "game": {
+    "id": 5577100,
+    "roundId": 219728,
+    "slug": "Otsuka_Shou-Alfene_Ambdullah",
+    "createAt": "2026-09-16T07:11:16.992Z",
+    "result": "1-0",
+    "site": "https://www.chess.com/events/2026-fide-chess-olympiad-open-live/01/Otsuka_Shou-Alfene_Ambdullah",
+    "white": {"name": "Otsuka, Shou"},
+    "black": {"name": "Alfene Ambdullah"}
+  },
+  "moves": [
+    {"ply": 0, "cbn": "e2e4_e4"},
+    {"ply": 1, "cbn": "c7c5_c5"},
+    {"ply": 2, "cbn": "g1f3_Nf3"},
+    {"ply": 3, "cbn": "b8c6_Nc6"}
+  ]
+}
