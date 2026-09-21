@@ -155,6 +155,27 @@ def test_package_service_emits_interoperable_objects_and_is_idempotent(tmp_path)
     assert canonical_object.read_bytes() == canonical.canonical_path.read_bytes()
 
 
+def test_package_manifest_ignores_mutable_source_last_seen_at(tmp_path):
+    registry, tournament_id, _canonical = seed_packaging_fixture(tmp_path)
+    store = LocalObjectStore(tmp_path / "objects")
+    service = PackageService(registry, store, tmp_path / "workspace")
+
+    first = service.package("fixture-tournament", target_plies=6)
+    first_manifest = (tmp_path / "objects" / first.manifest_key).read_bytes()
+
+    with registry._connect() as connection:
+        connection.execute(
+            "UPDATE source_tournaments SET last_seen_at = ? WHERE tournament_id = ?",
+            ("2099-01-01T00:00:00Z", tournament_id),
+        )
+
+    second = service.package("fixture-tournament", target_plies=6)
+    second_manifest = (tmp_path / "objects" / second.manifest_key).read_bytes()
+
+    assert second_manifest == first_manifest
+    assert b"last_seen_at" not in second_manifest
+
+
 def test_package_service_rejects_checksum_mismatch_before_ready(tmp_path):
     registry, tournament_id, canonical = seed_packaging_fixture(tmp_path)
     with registry._connect() as connection:
