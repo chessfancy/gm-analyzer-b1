@@ -399,6 +399,10 @@ It reports:
 - Do not put cloud/object-store credentials in JobSpec, manifests or Git.
 - Keep the Oracle VCN/security rules restrictive; analysis needs outbound HTTPS
   and SSH administration, not a public application port.
+- This image has `PasswordAuthentication no` and `KbdInteractiveAuthentication no`; keep SSH key-only.
+- SSH is socket-activated (`ssh.socket`) and was observed receiving routine Internet
+  scan attempts. If practical, restrict OCI TCP/22 ingress to your administrative IP/CIDR.
+- `unattended-upgrades` is enabled and active on the validated image.
 - The host currently has no swap. With 12 GB RAM and the selected 2 x 1536 MB
   Hash profile, swap is not required for the initial worker.
 - Do not auto-pull Git while a production job is running.
