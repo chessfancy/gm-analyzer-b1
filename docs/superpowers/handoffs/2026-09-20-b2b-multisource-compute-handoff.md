@@ -64,11 +64,23 @@ Hot priority: 46th FIDE Chess Olympiad Samarkand 2026.
 Verified 2026-09-20: Lichess has live split Open/Women broadcast feeds.
 Repeated round refreshes must be idempotent and retain raw provenance.
 
-### Chess.com / Chess24
-OTB event/broadcast only; no ordinary online player archives.
-The 2026 Olympiad is currently broadcast there. Prefer an explicit PGN
-or structured event game endpoint; do not scrape visual boards if a
-structured feed exists.
+### Chess.com / Chess24 — DEFERRED
+Do not include Chess.com in the current production ingestion schedule.
+
+Live investigation on 2026-09-21 found:
+- public room/event metadata is available;
+- complete game moves are delivered through the Events PubSub path;
+- the official frontend PGN download route redirects unauthenticated
+  requests to login.
+
+Do not scrape rendered boards, reverse-engineer PubSub, or store
+Chess.com account credentials on Oracle during this milestone.
+
+See:
+`docs/superpowers/plans/2026-09-21-live-source-finalization-twic-only.md`
+
+Revisit only if a stable unauthenticated structured move/PGN endpoint
+becomes available or the source becomes uniquely valuable.
 ## Critical path: B2b workload packaging
 
 Existing implementation plan:
