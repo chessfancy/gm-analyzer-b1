@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from http.client import InvalidURL
 from io import BytesIO
 import json
 from pathlib import Path
@@ -393,6 +394,54 @@ def test_chesscom_event_page_uses_live_room_and_game_api_for_otb_pgn(tmp_path):
     ]
     assert b'[White "Otsuka, Shou"]' in destination.read_bytes()
     assert b"1. e4 c5 2. Nf3 Nc6 1-0" in destination.read_bytes()
+
+
+def test_chesscom_provider_source_url_percent_encodes_spaces_before_http(tmp_path):
+    raw_path = "/events/2026-fide-chess-olympiad-open/Samarkand, UZ"
+    encoded_path = "/events/2026-fide-chess-olympiad-open/Samarkand,%20UZ"
+    payload = {
+        "event_id": "2026-fide-chess-olympiad-open",
+        "games": [
+            {
+                "game_id": "board-1",
+                "source_url": f"https://chesscom.test{raw_path}",
+                "otb": True,
+                "broadcast": True,
+            }
+        ],
+    }
+
+    def page_response(request):
+        if any(character.isspace() for character in request.full_url):
+            raise InvalidURL(f"URL contains raw whitespace: {request.full_url!r}")
+        return _response(
+            b"<html><head><title>Olympiad OTB game</title></head>"
+            b"<body>broadcast game</body></html>",
+            request.full_url,
+        )
+
+    opener = FixtureOpener(
+        {
+            ("GET", "/broadcast/samarkand-2026"): lambda request: _response(
+                json.dumps(payload).encode(), request.full_url
+            ),
+            ("GET", raw_path): page_response,
+            ("GET", encoded_path): page_response,
+        }
+    )
+    adapter = ChessComBroadcastAdapter(base_url="https://chesscom.test", opener=opener)
+
+    discovered_ref = adapter.discover(CHESSCOM_FEED_URL)[0]
+    assert discovered_ref.source_url == f"https://chesscom.test{encoded_path}"
+    raw_ref = SourceRef(
+        "chesscom-broadcast",
+        "event:2026-fide-chess-olympiad-open/game:board-1",
+        f"https://chesscom.test{raw_path}",
+    )
+    descriptor = adapter.describe(raw_ref)
+
+    assert descriptor.ref.source_url == f"https://chesscom.test{encoded_path}"
+    assert opener.request_records[-1]["path"] == encoded_path
 
 
 def test_chesscom_download_preserves_pgn_bytes_and_source_provenance(tmp_path):

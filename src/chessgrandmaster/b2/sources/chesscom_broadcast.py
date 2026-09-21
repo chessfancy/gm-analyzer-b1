@@ -8,7 +8,7 @@ import re
 from pathlib import Path
 import tempfile
 from typing import Any, Iterable
-from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse
+from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse, urlunparse
 from urllib.request import Request
 
 from ._common import (
@@ -42,6 +42,8 @@ _DEFAULT_HOSTS = {
 }
 _ID_PART_RE = re.compile(r"^[^/\\?#\s]+$")
 _EXTERNAL_RE = re.compile(r"^event:(?P<event>[^/]+)/game:(?P<game>[^/]+)$")
+_URL_PATH_SAFE = "/:@-._~!$&'()*+,;=%"
+_URL_COMPONENT_SAFE = "/?:@-._~!$&'()*+,;=%"
 
 
 class _TitleParser(HTMLParser):
@@ -75,6 +77,19 @@ def _part(value: object) -> str | None:
         return None
     value = value.strip()
     return value if value and _ID_PART_RE.fullmatch(value) else None
+
+
+def _encode_url_components(url: str) -> str:
+    """Escape provider-returned whitespace before handing a URL to urllib."""
+    parsed = urlparse(url)
+    return urlunparse(
+        parsed._replace(
+            path=quote(parsed.path, safe=_URL_PATH_SAFE),
+            params=quote(parsed.params, safe=_URL_COMPONENT_SAFE),
+            query=quote(parsed.query, safe=_URL_COMPONENT_SAFE),
+            fragment=quote(parsed.fragment, safe=_URL_COMPONENT_SAFE),
+        )
+    )
 
 
 def _first(mapping: dict[str, Any], *names: str) -> object | None:
@@ -272,14 +287,14 @@ class ChessComBroadcastAdapter:
 
     def _page_url(self, event_id: str, game_id: str, source_url: str | None = None) -> str:
         if source_url:
-            source_url = urljoin(self.base_url + "/", source_url)
+            source_url = _encode_url_components(urljoin(self.base_url + "/", source_url))
             same_origin(self.base_url, source_url, self.allowed_hosts, "Chess.com source URL")
             return source_url
         return f"{self.base_url}/broadcast/{quote(event_id)}/games/{quote(game_id)}"
 
     def _pgn_url(self, event_id: str, game_id: str, source_url: str, candidate: str | None) -> str:
         if candidate:
-            candidate = urljoin(source_url, candidate)
+            candidate = _encode_url_components(urljoin(source_url, candidate))
         elif urlparse(source_url).path.casefold().endswith(".pgn"):
             candidate = source_url
         else:
@@ -456,7 +471,7 @@ class ChessComBroadcastAdapter:
     def discover(self, query: str) -> list[SourceRef]:
         if not isinstance(query, str) or not query.strip():
             raise ValueError("Chess.com Broadcast discovery requires a structured feed or game URL")
-        query = query.strip()
+        query = _encode_url_components(query.strip())
         if query.startswith("chesscom-broadcast:"):
             event_id, game_id = _parse_external_id(query.removeprefix("chesscom-broadcast:"))
             source_url = self._page_url(event_id, game_id)
@@ -521,6 +536,10 @@ class ChessComBroadcastAdapter:
             raise ValueError("Chess.com source URL identity does not match source ref")
         return event_id, game_id
 
+    @staticmethod
+    def _normalized_ref(ref: SourceRef) -> SourceRef:
+        return SourceRef(ref.provider, ref.external_id, _encode_url_components(ref.source_url))
+
     def _record_from_page(self, ref: SourceRef, event_id: str, game_id: str) -> dict[str, Any]:
         fetched = fetch_body(
             self.opener,
@@ -565,6 +584,7 @@ class ChessComBroadcastAdapter:
         return self._records[f"event:{event_id}/game:{game_id}"]
 
     def describe(self, ref: SourceRef) -> SourceDescriptor:
+        ref = self._normalized_ref(ref)
         event_id, game_id = self._validate_ref(ref)
         record = self._record_from_page(ref, event_id, game_id)
         mapping = record["mapping"]
@@ -711,6 +731,7 @@ class ChessComBroadcastAdapter:
         return destination
 
     def download_pgn(self, ref: SourceRef, destination: Path) -> Path:
+        ref = self._normalized_ref(ref)
         event_id, game_id = self._validate_ref(ref)
         key = f"event:{event_id}/game:{game_id}"
         record = self._records.get(key)
