@@ -306,9 +306,9 @@ class TwicAdapter:
                 record = self._records[f"twic{issue}"]
         text = str(record.get("text", ""))
         lower_text = text.casefold()
+        # TWIC weekly PGNs contain mixed time controls; per-game filtering
+        # must happen downstream before production canonicalization/analysis.
         control = None
-        if re.search(r"\bclassical\b|\bstandard\b", lower_text):
-            control = "classical"
         is_otb: bool | None = None
         if re.search(r"\bover[ -]the[ -]board\b|\botb\b", lower_text):
             is_otb = True

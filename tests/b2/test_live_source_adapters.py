@@ -536,6 +536,7 @@ def test_twic_discovers_archive_pgn_and_preserves_issue_provenance(tmp_path):
     assert ref == SourceRef("twic", "twic1660", TWIC_ARCHIVE_URL)
     assert descriptor.title == "The Week in Chess 1660"
     assert descriptor.pgn_url == "https://twic.test/zips/twic1660g.zip"
+    assert descriptor.time_control_hint is None
     assert destination.read_bytes() == pgn
     assert [record["path"] for record in opener.request_records] == [
         "/html/twic1660.html",
