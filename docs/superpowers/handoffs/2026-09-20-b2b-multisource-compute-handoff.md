@@ -105,24 +105,73 @@ Recommended B2b order:
 JobSpec must not contain provider, workers, threads, Hash, credentials,
 engine binary path, or notebook/cloud paths.
 
-## Compute targets
+## Compute/control-plane targets
 
 All providers consume the same JobSpec/shard and differ only in runtime
 configuration.
 
-### Oracle Cloud
-New first always-on worker target after B2b acceptance.
-Record instance shape, CPU architecture/vCPU, RAM, OS, disk and object
-store/network access before deployment. Do not rerun Stockfish
-benchmarks merely to choose settings.
-Oracle worker flow:
+### Oracle Cloud — coordinator first, worker second
 
-JobSpec + shard PGN
--> frozen B1 analysis
--> analysis.sqlite + raw UCI archive
--> Mistakes.pgn + Blunders.pgn
--> checksum result bundle
--> upload/collect with job id + config hash
+Oracle is the always-on **control plane / coordinator**. It is not the
+primary bulk Stockfish machine.
+
+Validated host on 2026-09-21:
+
+- VM.Standard.A1.Flex
+- 2 OCPU, ARM64 Neoverse-N1
+- 12 GB RAM
+- Ubuntu 24.04.4 LTS
+- ~184 GB root filesystem
+- Desktop Commander reconnects automatically after reboot
+- Stockfish 19 ARM64 is installed and verified
+
+Primary Oracle responsibilities:
+
+- run scheduled/bounded source ingestion for Chess-Results, Lichess
+  Broadcast, Chess.com/Chess24 and TWIC;
+- keep a durable local dispatch queue;
+- package new/changed canonical revisions into provider-neutral B2b jobs;
+- assign/export jobs to Kaggle, Deepnote, Molab/Marimo, Codespaces and
+  other headless workers;
+- track lease/attempt/status/result metadata;
+- receive result bundles back;
+- verify checksums and job/config identity;
+- retain a durable local copy of accepted results and dispatch state;
+- surface failed/stale jobs for retry.
+
+Oracle may also execute B1 jobs itself, but initially reserve it for
+small/high-value/time-sensitive work such as live Olympiad rounds or
+when another worker is unavailable.
+
+Initial Oracle B1 runtime profile when used as a worker:
+
+- 2 workers
+- 1 Stockfish thread per worker
+- 1536 MB Hash per worker
+- depth 19
+
+Do not run multiple CPU-heavy analysis jobs concurrently on this 2-OCPU VM.
+
+### Storage/transport policy for the first distributed cycle
+
+Do **not** make S3 a prerequisite for the first distributed cycle.
+
+Start with an explicit local Oracle queue and portable job/result bundles.
+The coordinator must separate queue semantics from transport semantics so
+we can use whichever transfer path is available for each worker.
+
+Required first transport abstraction:
+
+- export one immutable job bundle to a filesystem path;
+- import one result bundle from a filesystem path;
+- verify all checksums before accepting it;
+- preserve job/attempt identity;
+- support manual upload/download or a platform-specific wrapper without
+  changing JobSpec.
+
+S3-compatible ObjectStore remains a later transport/backend option, not
+the current critical path. Do not put cloud credentials or transport
+details into JobSpec.
 
 ### Deepnote
 Existing conservative profile: 2 workers x 1 thread x 768 MB Hash.
@@ -153,8 +202,23 @@ Priority order:
 Use temp registries for development. Never mutate production corpus
 during adapter tests.
 
-### Agent C — compute deployment
-Prepare Oracle Cloud first, then Deepnote/Kaggle/Molab-Marimo wrappers.
+### Agent C — coordinator + compute deployment
+Build the provider-neutral coordinator/dispatch scaffolding around B2b.
+
+Priority:
+
+1. Oracle local durable queue/state + filesystem export/import bundles.
+2. Result checksum/identity verification and accepted-result archive.
+3. Thin worker contract/wrapper shared by all platforms.
+4. Kaggle dispatch/runner path.
+5. Deepnote dispatch/runner path.
+6. Molab/Marimo dispatch/runner path.
+7. Codespaces fallback dispatch/runner path.
+8. Oracle worker path for urgent/small jobs.
+
+Do not require S3 for this phase. Keep transport pluggable so S3 can be
+added later without changing JobSpec or analysis semantics.
+
 Do not change B1 chess semantics and do not start a large production
 Stockfish run before B2b acceptance.
 
@@ -163,13 +227,17 @@ Stockfish run before B2b acceptance.
 1. Integrate B2b local path.
 2. Package one small production revision.
 3. Import one shard into B1 without Stockfish.
-4. Add/verify S3-compatible storage.
-5. Run ONE packaged shard on Oracle Cloud.
-6. Verify result mapping to canonical fingerprints.
-7. Scale analysis to Oracle + Deepnote + Kaggle + Molab/Marimo.
+4. Bring up Oracle coordinator local queue + filesystem bundle export/import.
+5. Run ONE packaged shard on a worker path and return its result bundle.
+   Oracle itself is acceptable for this acceptance only; it is not the
+   intended primary bulk worker.
+6. Verify result mapping, checksums and canonical fingerprints on Oracle.
+7. Bring Kaggle/Deepnote/Molab-Marimo/Codespaces worker wrappers online.
 8. Integrate live Olympiad Lichess/Chess.com feeds as adapters become green.
 9. Add TWIC 1660+ bulk ingestion.
-10. Package only new/changed revisions and feed the same analysis queue.
+10. Dispatch only new/changed jobs and collect results centrally on Oracle.
+11. Add S3-compatible transport later if/when it materially simplifies
+    distribution or retention.
 
 Because the Olympiad is live now, source capture should proceed in
 parallel with B2b, but B2b remains the main analysis critical path.
@@ -179,9 +247,13 @@ parallel with B2b, but B2b remains the main analysis critical path.
 ```text
 one canonical production revision
 -> deterministic B2b shards + JobSpecs
--> one shard executed on Oracle Cloud
--> analysis.sqlite + raw UCI + PGN outputs verified
--> result maps back to canonical fingerprints
+-> Oracle durable dispatch queue
+-> one shard exported to a worker
+-> analysis.sqlite + raw UCI + PGN outputs returned
+-> Oracle verifies bundle + maps it to canonical fingerprints
 ```
 
-After that milestone, scale horizontally without redesigning B1 or B2a.
+After that milestone, scale horizontally to Kaggle, Deepnote,
+Molab/Marimo, Codespaces and other headless workers without redesigning
+B1, B2a or JobSpec. Oracle remains the 24/7 coordinator and only an
+optional/urgent B1 worker.
