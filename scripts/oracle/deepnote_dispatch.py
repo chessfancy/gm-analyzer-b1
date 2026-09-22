@@ -111,15 +111,21 @@ def _download_file(project_id: str, remote_path: str, local_path: Path) -> None:
         local_path.write_bytes(response.read())
 
 
-def _remote_code(job_dir: str, result_zip: str, repo_sha: str) -> str:
+def _remote_code(
+    job_dir: str,
+    result_zip: str,
+    repo_sha: str,
+    attempt_tag: str,
+) -> str:
     return f'''from pathlib import Path
 import os, shutil, subprocess
 
 WORK = Path("/work")
-REPO = WORK / "cgm-distributed" / "repo"
-VENV = WORK / "cgm-distributed" / ".venv"
+RUNTIME = WORK / "cgm-worker" / "runtime" / {attempt_tag!r}
+REPO = RUNTIME / "repo"
+VENV = RUNTIME / ".venv"
 BUNDLE = WORK / {job_dir!r}
-RESULT = WORK / "cgm-distributed" / "result-bundle"
+RESULT = RUNTIME / "result-bundle"
 ZIP_BASE = WORK / {result_zip[:-4]!r}
 SHA = {repo_sha!r}
 
@@ -127,11 +133,10 @@ def run(cmd, cwd=None, env=None):
     print("+", " ".join(map(str, cmd)), flush=True)
     subprocess.run(cmd, cwd=cwd, env=env, check=True)
 
-if not REPO.exists():
-    REPO.parent.mkdir(parents=True, exist_ok=True)
-    run(["git", "clone", "https://github.com/chessfancy/gm-analyzer-b1.git", str(REPO)])
-else:
-    run(["git", "fetch", "origin"], cwd=REPO)
+if RUNTIME.exists():
+    shutil.rmtree(RUNTIME)
+RUNTIME.mkdir(parents=True, exist_ok=True)
+run(["git", "clone", "https://github.com/chessfancy/gm-analyzer-b1.git", str(REPO)])
 run(["git", "reset", "--hard", SHA], cwd=REPO)
 
 env = os.environ.copy()
@@ -152,6 +157,7 @@ run([
 ZIP_BASE.parent.mkdir(parents=True, exist_ok=True)
 zip_path = shutil.make_archive(str(ZIP_BASE), "zip", root_dir=RESULT.parent, base_dir=RESULT.name)
 print("RESULT_ZIP", zip_path)
+shutil.rmtree(RUNTIME)
 '''
 
 
@@ -187,7 +193,7 @@ def dispatch_one(*, poll_seconds: int = 10, timeout_seconds: int = 14400) -> int
             _upload_file(project_id, f"{remote_dir}/{local.name}", local)
 
     remote_zip = f"cgm-worker/results/{attempt_tag}.zip"
-    content = _remote_code(remote_dir, remote_zip, repo_sha)
+    content = _remote_code(remote_dir, remote_zip, repo_sha, attempt_tag)
     _request_json("PATCH", f"/blocks/{block_id}", {"content": content})
 
     created = _request_json(
