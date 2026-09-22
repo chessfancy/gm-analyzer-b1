@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import time
 import urllib.parse
 import urllib.request
@@ -151,6 +152,21 @@ if RUNTIME.exists():
 RUNTIME.mkdir(parents=True, exist_ok=True)
 run(["git", "clone", "https://github.com/chessfancy/gm-analyzer-b1.git", str(REPO)])
 run(["git", "reset", "--hard", SHA], cwd=REPO)
+
+# Deepnote's Python 3.13 ensurepip can hang until the detached-run timeout.
+# Create the venv explicitly without ensurepip, then seed pip into it from
+# Deepnote's already-working system pip before invoking the normal setup.
+run([sys.executable, "-m", "venv", "--without-pip", str(VENV)])
+run([
+    sys.executable,
+    "-m",
+    "pip",
+    "--python",
+    str(VENV / "bin" / "python"),
+    "install",
+    "--upgrade",
+    "pip",
+])
 
 env = os.environ.copy()
 env["CGM_VENV"] = str(VENV)
