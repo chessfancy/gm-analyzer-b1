@@ -132,7 +132,7 @@ def _remote_code(
     attempt_tag: str,
 ) -> str:
     return f'''from pathlib import Path
-import os, shutil, subprocess
+import os, shutil, subprocess, sys
 
 WORK = Path("/work")
 RUNTIME = WORK / "cgm-worker" / "runtime" / {attempt_tag!r}
