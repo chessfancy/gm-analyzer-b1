@@ -103,6 +103,7 @@ def execute_job(bundle: Path, result_root: Path, provider: str) -> Path:
     }
     (result_root / "job-result.json").write_bytes(canonical_json_bytes(result_json))
     write_checksums(result_root)
+    shutil.rmtree(work_root)
     return result_root
 
 
