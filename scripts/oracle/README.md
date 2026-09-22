@@ -43,8 +43,76 @@ cd ~/projects/gm-analyzer-b1
 ```
 
 Kaggle authentication uses the current API-token mechanism supported by
-the Kaggle CLI. Deepnote verification uses `GET https://api.deepnote.com/v2/me`
-and lists accessible projects through the v2 API.
+the Kaggle CLI. Deepnote verification uses the v2 API.
 
-Do not commit, print, or copy the credential values into logs, JobSpec,
+Do not commit, print, or copy credential values into logs, JobSpec,
 manifests, result bundles, or chat.
+
+## Reusable dispatchers
+
+Each dispatcher performs exactly one coordinator lease per invocation.
+
+Kaggle:
+
+```bash
+cd ~/projects/gm-analyzer-b1
+PYTHONPATH=src .venv/bin/python scripts/oracle/kaggle_dispatch.py
+```
+
+Deepnote:
+
+```bash
+cd ~/projects/gm-analyzer-b1
+PYTHONPATH=src .venv/bin/python scripts/oracle/deepnote_dispatch.py
+```
+
+Both follow the same contract:
+
+```text
+lease
+-> export immutable B2b job bundle
+-> provider execution
+-> download portable result bundle
+-> coordinator checksum/identity validation
+-> import_result()
+-> COMPLETED
+```
+
+Provider/runtime metadata never changes the immutable JobSpec.
+
+Kaggle creates one private temporary dataset and one private kernel per
+attempt. They are deleted after a successful result import unless
+`--keep-remote` is supplied.
+
+Deepnote uploads one attempt-scoped job bundle, runs the
+`CGM_Distributed_Worker` notebook detached, then downloads the result
+ZIP. Submission is locally serialized so concurrent Oracle dispatchers
+cannot race while updating the shared notebook block. Each remote run
+also uses an attempt-specific runtime directory.
+
+Provider failures are returned to the coordinator as `RETRY_PENDING`
+when possible; failed result identity/checksum validation is never
+silently accepted.
+
+Useful options:
+
+```text
+--poll-seconds N
+--timeout-seconds N
+--keep-remote
+```
+
+The portable worker entrypoint used by both providers is:
+
+```text
+scripts/workers/run_job_bundle.py
+```
+
+It produces:
+
+- `analysis.sqlite`
+- `Mistakes.pgn`
+- `Blunders.pgn`
+- raw UCI archive
+- `job-result.json`
+- `checksums.json`
