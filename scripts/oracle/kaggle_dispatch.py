@@ -120,6 +120,7 @@ def dispatch_one(
     poll_seconds: int = 30,
     timeout_seconds: int = 14400,
     keep_remote: bool = False,
+    min_priority: int | None = None,
 ) -> int:
     username = _username()
     repo_sha = _run(["git", "-C", REPO, "rev-parse", "HEAD"], timeout=30).stdout.strip()
@@ -128,6 +129,7 @@ def dispatch_one(
         "kaggle-api",
         "kaggle",
         lease_seconds=timeout_seconds + 1800,
+        min_priority=min_priority,
     )
     if lease is None:
         print(json.dumps({"ok": True, "message": "no pending job"}))
@@ -288,6 +290,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--poll-seconds", type=int, default=30)
     parser.add_argument("--timeout-seconds", type=int, default=14400)
+    parser.add_argument("--min-priority", type=int, default=None)
     parser.add_argument(
         "--keep-remote",
         action="store_true",
@@ -298,6 +301,7 @@ def main(argv=None) -> int:
         poll_seconds=args.poll_seconds,
         timeout_seconds=args.timeout_seconds,
         keep_remote=args.keep_remote,
+        min_priority=args.min_priority,
     )
 
 

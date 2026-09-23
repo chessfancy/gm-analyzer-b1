@@ -164,6 +164,44 @@ def test_sqlite_state_reopens_without_losing_queue_or_attempts(tmp_path: Path):
     assert len(reopened.get_attempts("job-a")) == 1
 
 
+def test_lease_filters_by_min_priority_and_max_plies(tmp_path: Path):
+    coordinator = make_coordinator(tmp_path)
+
+    big = make_job_bundle(tmp_path / "big", "job-big")
+    small = make_job_bundle(tmp_path / "small", "job-small")
+    low = make_job_bundle(tmp_path / "low", "job-low")
+
+    for bundle, plies in ((big, 2500), (small, 1800), (low, 1000)):
+        job_path = bundle / "job.json"
+        job = json.loads(job_path.read_text(encoding="utf-8"))
+        job["input"]["plies"] = plies
+        job_path.write_text(json.dumps(job, sort_keys=True), encoding="utf-8")
+        write_checksums(bundle)
+
+    coordinator.register_job(big, priority=700)
+    coordinator.register_job(small, priority=650)
+    coordinator.register_job(low, priority=100)
+
+    deepnote = coordinator.lease_next(
+        "deepnote-worker",
+        "deepnote",
+        min_priority=500,
+        max_plies=2000,
+    )
+    assert deepnote is not None
+    assert deepnote.job_id == "job-small"
+
+    kaggle = coordinator.lease_next(
+        "kaggle-worker",
+        "kaggle",
+        min_priority=500,
+    )
+    assert kaggle is not None
+    assert kaggle.job_id == "job-big"
+
+    assert coordinator.get_job("job-low").state is JobState.PENDING
+
+
 def test_filesystem_transport_validates_and_copies_job_bundle(tmp_path: Path):
     job = make_job_bundle(tmp_path / "job")
     transport = FilesystemBundleTransport()

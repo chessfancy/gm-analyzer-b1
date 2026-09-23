@@ -103,13 +103,54 @@ def _upload_file(project_id: str, remote_path: str, local_path: Path) -> str:
 
 def _download_file(project_id: str, remote_path: str, local_path: Path) -> None:
     query = urllib.parse.urlencode({"projectId": project_id, "path": remote_path})
-    req = urllib.request.Request(
-        BASE + "/files/download?" + query,
-        headers=_headers(),
-    )
+    url = BASE + "/files/download?" + query
     local_path.parent.mkdir(parents=True, exist_ok=True)
-    with urllib.request.urlopen(req, timeout=180) as response:
-        local_path.write_bytes(response.read())
+    partial = local_path.with_name(local_path.name + ".part")
+    partial.unlink(missing_ok=True)
+
+    # Deepnote's large file endpoint can occasionally terminate a chunked
+    # response early. curl's retry + continue support has proven reliable for
+    # result bundles and raw-UCI archives while keeping partial bytes durable.
+    command = [
+        "curl",
+        "--fail",
+        "--location",
+        "--silent",
+        "--show-error",
+        "--retry",
+        "5",
+        "--retry-delay",
+        "2",
+        "--retry-all-errors",
+        "--connect-timeout",
+        "30",
+        "--max-time",
+        "900",
+        "--continue-at",
+        "-",
+        "-H",
+        f"Authorization: Bearer {_token()}",
+        "-H",
+        "Accept: application/octet-stream",
+        "-o",
+        str(partial),
+        url,
+    ]
+    proc = subprocess.run(
+        command,
+        text=True,
+        capture_output=True,
+        timeout=1200,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"Deepnote download failed rc={proc.returncode}: "
+            f"{proc.stderr[-2000:]}"
+        )
+    if not partial.is_file():
+        raise RuntimeError("Deepnote download produced no file")
+    partial.replace(local_path)
 
 
 def _delete_file(project_id: str, remote_path: str) -> None:
@@ -259,6 +300,8 @@ def dispatch_one(
     poll_seconds: int = 10,
     timeout_seconds: int = 14400,
     keep_remote: bool = False,
+    min_priority: int | None = None,
+    max_plies: int | None = None,
 ) -> int:
     cfg = json.loads(CONFIG.read_text(encoding="utf-8"))
     project_id = cfg["project_id"]
@@ -276,6 +319,8 @@ def dispatch_one(
         "deepnote-api",
         "deepnote",
         lease_seconds=timeout_seconds + 1800,
+        min_priority=min_priority,
+        max_plies=max_plies,
     )
     if lease is None:
         print(json.dumps({"ok": True, "message": "no pending job"}))
@@ -381,6 +426,8 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--poll-seconds", type=int, default=10)
     parser.add_argument("--timeout-seconds", type=int, default=14400)
+    parser.add_argument("--min-priority", type=int, default=None)
+    parser.add_argument("--max-plies", type=int, default=None)
     parser.add_argument(
         "--keep-remote",
         action="store_true",
@@ -391,6 +438,8 @@ def main(argv=None) -> int:
         poll_seconds=args.poll_seconds,
         timeout_seconds=args.timeout_seconds,
         keep_remote=args.keep_remote,
+        min_priority=args.min_priority,
+        max_plies=args.max_plies,
     )
 
 

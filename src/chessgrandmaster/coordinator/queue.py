@@ -358,8 +358,11 @@ class Coordinator:
         worker: str,
         provider: str | ProviderProfile = "oracle-urgent",
         lease_seconds: int | float | None = None,
+        *,
+        min_priority: int | None = None,
+        max_plies: int | None = None,
     ) -> Lease | None:
-        """Lease the deterministically first pending job for a provider."""
+        """Lease the deterministically first eligible pending job for a provider."""
 
         provider_name, max_jobs = self._provider_limits(provider)
         lease_duration = (
@@ -380,13 +383,25 @@ class Coordinator:
                 ).fetchone()[0]
                 if active >= max_jobs:
                     return None
+            conditions = ["state IN ('PENDING', 'RETRY_PENDING')"]
+            parameters: list[object] = []
+            if min_priority is not None:
+                conditions.append("priority >= ?")
+                parameters.append(int(min_priority))
+            if max_plies is not None:
+                conditions.append(
+                    "CAST(json_extract(job_json, '$.input.plies') AS INTEGER) <= ?"
+                )
+                parameters.append(int(max_plies))
+
             row = connection.execute(
-                """
+                f"""
                 SELECT * FROM jobs
-                WHERE state IN ('PENDING', 'RETRY_PENDING')
+                WHERE {' AND '.join(conditions)}
                 ORDER BY priority DESC, job_id ASC
                 LIMIT 1
-                """
+                """,
+                parameters,
             ).fetchone()
             if row is None:
                 return None

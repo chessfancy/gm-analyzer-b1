@@ -13,6 +13,7 @@ exec 9>"$LOCK"
 cd "$REPO"
 printf '%s start lichess olympiad refresh\n' "$(date -Is)" >> "$LOG"
 if PYTHONPATH=src .venv/bin/python scripts/oracle/refresh_lichess_olympiad.py >> "$LOG" 2>&1; then
+  PYTHONPATH=src .venv/bin/python scripts/oracle/reconcile_olympiad_queue.py >> "$LOG" 2>&1
   printf '%s success\n' "$(date -Is)" >> "$LOG"
 else
   rc=$?

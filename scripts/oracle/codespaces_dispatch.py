@@ -183,6 +183,7 @@ def dispatch_one(
     timeout_seconds: int = 14400,
     keep_remote: bool = False,
     keep_running: bool = False,
+    min_priority: int | None = None,
 ) -> int:
     if not GH.exists():
         raise FileNotFoundError(f"GitHub CLI not found: {GH}")
@@ -201,6 +202,7 @@ def dispatch_one(
             f"codespaces:{codespace_name}",
             "codespaces",
             lease_seconds=timeout_seconds + 1800,
+            min_priority=min_priority,
         )
         if lease is None:
             print(json.dumps({"ok": True, "message": "no pending job"}))
@@ -298,6 +300,7 @@ def main(argv=None) -> int:
     parser.add_argument("--codespace")
     parser.add_argument("--poll-seconds", type=int, default=5)
     parser.add_argument("--timeout-seconds", type=int, default=14400)
+    parser.add_argument("--min-priority", type=int, default=None)
     parser.add_argument(
         "--keep-remote",
         action="store_true",
@@ -315,6 +318,7 @@ def main(argv=None) -> int:
         timeout_seconds=args.timeout_seconds,
         keep_remote=args.keep_remote,
         keep_running=args.keep_running,
+        min_priority=args.min_priority,
     )
 
 

@@ -32,6 +32,33 @@ def test_remote_code_reuses_deepnote_python_environment():
     assert '"--python"' not in code
 
 
+def test_download_file_uses_resumable_curl(monkeypatch, tmp_path):
+    calls = []
+
+    class Result:
+        returncode = 0
+        stderr = ""
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        output = Path(command[command.index("-o") + 1])
+        output.write_bytes(b"result")
+        return Result()
+
+    monkeypatch.setattr(deepnote_dispatch.subprocess, "run", fake_run)
+    monkeypatch.setattr(deepnote_dispatch, "_token", lambda: "secret-token")
+
+    target = tmp_path / "result.zip"
+    deepnote_dispatch._download_file("project", "results/result.zip", target)
+
+    assert target.read_bytes() == b"result"
+    command, kwargs = calls[0]
+    assert "--continue-at" in command
+    assert "--retry-all-errors" in command
+    assert "Authorization: Bearer secret-token" in command
+    assert kwargs["check"] is False
+
+
 def test_run_error_details_includes_top_level_deepnote_error(monkeypatch):
     error = "Detached run terminated: DETACHED_TIMEOUT_PREEMPTIBLE"
 
