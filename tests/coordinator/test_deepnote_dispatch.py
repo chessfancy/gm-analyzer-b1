@@ -24,6 +24,8 @@ def test_remote_code_reuses_deepnote_python_environment():
     assert "VENV = Path(sys.prefix)" in code
     assert 'env["CGM_VENV"] = str(VENV)' in code
     assert 'env["CGM_BOOTSTRAP_PYTHON"] = sys.executable' in code
+    assert 'env["CGM_INSTALL_DEV"] = "0"' in code
+    assert 'env["CGM_SKIP_PACKAGE_INSTALL"] = "1"' in code
     assert 'run(["bash", "scripts/setup_platform.sh"], cwd=REPO, env=env)' in code
     assert '"-m", "venv"' not in code
     assert "--without-pip" not in code

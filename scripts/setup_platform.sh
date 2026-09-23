@@ -32,14 +32,35 @@ if [[ ! -x "$VENV/bin/python" ]]; then
     fi
 fi
 PYTHON_BIN="$VENV/bin/python"
-CGM_ENGINE="$VENV/bin/cgm-engine"
-"$PYTHON_BIN" -m pip install -e "${ROOT}[dev]"
-ENGINE_PATH="$("$CGM_ENGINE" install-path)"
+if [[ "${CGM_SKIP_PACKAGE_INSTALL:-0}" == "1" ]]; then
+    echo "Reusing runtime Python dependencies."
+    "$PYTHON_BIN" - <<'PY_RUNTIME'
+import chess
+print("python-chess:", chess.__version__)
+PY_RUNTIME
+else
+    PACKAGE_SPEC="$ROOT"
+    if [[ "${CGM_INSTALL_DEV:-1}" != "0" ]]; then
+        PACKAGE_SPEC="${ROOT}[dev]"
+    fi
+    "$PYTHON_BIN" -m pip install -e "$PACKAGE_SPEC"
+fi
+
+run_cgm_engine() {
+    if [[ -x "$VENV/bin/cgm-engine" ]]; then
+        "$VENV/bin/cgm-engine" "$@"
+    else
+        PYTHONPATH="${ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" \
+            "$PYTHON_BIN" -m chessgrandmaster.engine_manifest "$@"
+    fi
+}
+
+ENGINE_PATH="$(run_cgm_engine install-path)"
 echo "Managed engine path: $ENGINE_PATH"
 ENGINE_OK=0
-if [[ -f "$ENGINE_PATH" ]] && "$CGM_ENGINE" verify "$ENGINE_PATH"; then ENGINE_OK=1; fi
+if [[ -f "$ENGINE_PATH" ]] && run_cgm_engine verify "$ENGINE_PATH"; then ENGINE_OK=1; fi
 if [[ "$ENGINE_OK" -ne 1 ]]; then CGM_PYTHON="$PYTHON_BIN" "$ROOT/scripts/install_stockfish.sh"; fi
-"$CGM_ENGINE" verify "$ENGINE_PATH"
+run_cgm_engine verify "$ENGINE_PATH"
 "$PYTHON_BIN" --version
 echo "Environment ready."
 echo "Venv   : $VENV"

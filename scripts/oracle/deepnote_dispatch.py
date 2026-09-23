@@ -158,6 +158,13 @@ run(["git", "reset", "--hard", SHA], cwd=REPO)
 env = os.environ.copy()
 env["CGM_VENV"] = str(VENV)
 env["CGM_BOOTSTRAP_PYTHON"] = sys.executable
+env["CGM_INSTALL_DEV"] = "0"
+try:
+    import chess  # noqa: F401
+except ImportError:
+    pass
+else:
+    env["CGM_SKIP_PACKAGE_INSTALL"] = "1"
 run(["bash", "scripts/setup_platform.sh"], cwd=REPO, env=env)
 
 python = VENV / "bin" / "python"
