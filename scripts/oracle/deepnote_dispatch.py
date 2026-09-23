@@ -137,7 +137,7 @@ import os, shutil, subprocess, sys
 WORK = Path("/work")
 RUNTIME = WORK / "cgm-worker" / "runtime" / {attempt_tag!r}
 REPO = RUNTIME / "repo"
-VENV = RUNTIME / ".venv"
+VENV = Path(sys.prefix)
 BUNDLE = WORK / {job_dir!r}
 RESULT = RUNTIME / "result-bundle"
 ZIP_BASE = WORK / {result_zip[:-4]!r}
@@ -153,23 +153,11 @@ RUNTIME.mkdir(parents=True, exist_ok=True)
 run(["git", "clone", "https://github.com/chessfancy/gm-analyzer-b1.git", str(REPO)])
 run(["git", "reset", "--hard", SHA], cwd=REPO)
 
-# Deepnote's Python 3.13 ensurepip can hang until the detached-run timeout.
-# Create the venv explicitly without ensurepip, then seed pip into it from
-# Deepnote's already-working system pip before invoking the normal setup.
-run([sys.executable, "-m", "venv", "--without-pip", str(VENV)])
-run([
-    sys.executable,
-    "-m",
-    "pip",
-    "--python",
-    str(VENV / "bin" / "python"),
-    "install",
-    "--upgrade",
-    "pip",
-])
-
+# Reuse Deepnote's already-active Python environment. Creating a nested
+# virtualenv and seeding pip can stall until the detached-run timeout.
 env = os.environ.copy()
 env["CGM_VENV"] = str(VENV)
+env["CGM_BOOTSTRAP_PYTHON"] = sys.executable
 run(["bash", "scripts/setup_platform.sh"], cwd=REPO, env=env)
 
 python = VENV / "bin" / "python"
@@ -199,6 +187,14 @@ def _run_error_details(run_id: str) -> str:
     except Exception as exc:
         return f"could not fetch run snapshot: {exc}"
     chunks: list[str] = []
+    run_error = run.get("error")
+    if run_error:
+        if isinstance(run_error, str):
+            chunks.append(run_error)
+        else:
+            chunks.append(
+                json.dumps(run_error, ensure_ascii=False, sort_keys=True)
+            )
     for block in run.get("snapshotBlocks") or []:
         for output in block.get("outputs") or []:
             if output.get("text"):
