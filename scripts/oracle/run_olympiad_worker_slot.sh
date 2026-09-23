@@ -32,7 +32,7 @@ case "$PROVIDER" in
       "$PYTHON" scripts/oracle/deepnote_dispatch.py
       --min-priority "$MIN_PRIORITY"
       --max-plies 2000
-      --poll-seconds 10
+      --poll-seconds 30
       --timeout-seconds 4000
     )
     ;;
