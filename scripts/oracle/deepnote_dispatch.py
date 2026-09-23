@@ -222,7 +222,12 @@ zip_path = shutil.make_archive(
     str(ZIP_BASE), "zip", root_dir=RESULT.parent, base_dir=RESULT.name
 )
 print("RESULT_ZIP", zip_path, flush=True)
-shutil.rmtree(RUNTIME)
+try:
+    shutil.rmtree(RUNTIME)
+except OSError as exc:
+    # Result ZIP is already durable in project storage. Cleanup failure must
+    # never turn a successful analysis into a failed coordinator attempt.
+    print("CLEANUP_WARNING", repr(exc), flush=True)
 '''
 
 
