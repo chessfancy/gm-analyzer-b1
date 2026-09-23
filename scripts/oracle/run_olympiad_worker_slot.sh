@@ -19,6 +19,31 @@ cd "$REPO"
 export PYTHONPATH=src
 
 case "$PROVIDER" in
+  kaggle) MAX_SLOTS=2 ;;
+  deepnote) MAX_SLOTS=2 ;;
+  codespaces) MAX_SLOTS=1 ;;
+  *) MAX_SLOTS=0 ;;
+esac
+
+ACTIVE="$("$PYTHON" - "$PROVIDER" <<'PY_ACTIVE'
+import sqlite3, sys
+from pathlib import Path
+provider=sys.argv[1]
+db=Path.home()/"data/cgm/coordinator.sqlite"
+con=sqlite3.connect(db)
+count=con.execute(
+    "SELECT COUNT(*) FROM attempts "
+    "WHERE provider=? AND state IN ('LEASED','EXPORTED','RUNNING')",
+    (provider,),
+).fetchone()[0]
+print(count)
+PY_ACTIVE
+)"
+if [[ "$ACTIVE" -ge "$MAX_SLOTS" ]]; then
+  exit 0
+fi
+
+case "$PROVIDER" in
   kaggle)
     CMD=(
       "$PYTHON" scripts/oracle/kaggle_dispatch.py
