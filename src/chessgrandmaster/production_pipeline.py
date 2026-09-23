@@ -1412,22 +1412,39 @@ def snapshot_audit(
             for depth in expected
         )
 
-        post_move_ids = [
-            row[0]
-            for row in con.execute(
-                """
-                SELECT DISTINCT ma.id
-                FROM move_analysis ma
-                JOIN engine_responses er
-                  ON er.analysis_id=ma.id
-                WHERE ma.run_id=?
-                  AND ma.status='completed'
-                  AND er.source_search='post_move'
-                ORDER BY ma.id
-                """,
-                (run_id,),
-            ).fetchall()
-        ]
+        post_move_rows = con.execute(
+            """
+            SELECT DISTINCT ma.id, m.fen_after
+            FROM move_analysis ma
+            JOIN moves m
+              ON m.id=ma.move_id
+            JOIN engine_responses er
+              ON er.analysis_id=ma.id
+            WHERE ma.run_id=?
+              AND ma.status='completed'
+              AND er.source_search='post_move'
+            ORDER BY ma.id
+            """,
+            (run_id,),
+        ).fetchall()
+
+        post_move_ids = []
+        post_move_terminal_ids = []
+        for analysis_id, fen_after in post_move_rows:
+            is_terminal = False
+            try:
+                is_terminal = chess.Board(fen_after).is_game_over(
+                    claim_draw=False
+                )
+            except (TypeError, ValueError):
+                # Keep malformed or unknown positions under the strict audit
+                # rather than silently exempting them.
+                is_terminal = False
+
+            if is_terminal:
+                post_move_terminal_ids.append(analysis_id)
+            else:
+                post_move_ids.append(analysis_id)
 
         post_move_missing = sum(
             depth not in snapshots.get((analysis_id, "post_move"), {})
@@ -1503,7 +1520,8 @@ def snapshot_audit(
         "primary_present":
             len(completed_ids) * len(expected) - primary_missing,
         "primary_missing": primary_missing,
-        "post_move_analyses": len(post_move_ids),
+        "post_move_analyses": len(post_move_rows),
+        "post_move_terminal_analyses": len(post_move_terminal_ids),
         "post_move_expected": len(post_move_ids) * len(expected),
         "post_move_present":
             len(post_move_ids) * len(expected) - post_move_missing,

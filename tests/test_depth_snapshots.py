@@ -399,6 +399,62 @@ def test_currmove_only_events_remain_in_raw_gzip_archive(tmp_path):
     )
 
 
+def test_terminal_post_move_mate_given_becomes_mate_in_one():
+    worker = _worker([], depth=19)
+    played_move = chess.Move.from_uci("d3d1")
+
+    info = {
+        "depth": 0,
+        "multipv": 1,
+        "score": chess.engine.PovScore(chess.engine.Mate(0), chess.WHITE),
+        "pv": [],
+    }
+
+    response = worker._response_from_info(
+        info,
+        chess.BLACK,
+        "post_move",
+        forced_first_move=played_move,
+    )
+
+    assert response.uci == "d3d1"
+    assert response.pv_uci == "d3d1"
+    assert response.cp == 0
+    assert response.mate == 1
+
+
+def test_checkmating_played_move_is_not_rated_as_blunder():
+    fen_before = "4R3/6pp/1k6/1p2p3/2n5/3r4/4q1PP/K7 b - - 5 37"
+    primary = [
+        _info(
+            depth=19,
+            score=chess.engine.PovScore(chess.engine.Mate(1), chess.BLACK),
+            wdl=None,
+            pv=("e2b2",),
+        )
+    ]
+    post_move = [
+        {
+            "depth": 0,
+            "multipv": 1,
+            "score": chess.engine.PovScore(chess.engine.Mate(0), chess.WHITE),
+            "pv": [],
+        }
+    ]
+
+    worker = _worker([], depth=19)
+    worker.engine = SequencedFakeEngine([primary, post_move])
+
+    result = worker.analyze_move(fen_before, "d3d1")
+
+    played = next(response for response in result.responses if response.is_played)
+    assert played.uci == "d3d1"
+    assert played.mate == 1
+    assert result.lucas_loss == 0
+    assert result.category == "NO_RATING"
+    assert result.nag == 0
+
+
 def test_post_move_snapshots_use_original_mover_pov_and_prepended_move():
     infos = [
         _info(

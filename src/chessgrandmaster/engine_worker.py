@@ -185,11 +185,16 @@ class LucasEngineWorker:
         # after a post-move search the score is flipped back
         # to the original mover's POV.
         #
-        # If that produces a positive mate, Lucas adds 1
-        # because the actual played move is inserted in front
-        # of the post-move PV.
-        if forced_first_move is not None and mate > 0:
-            mate += 1
+        # A terminal post-move position is reported by python-chess as
+        # MateGiven, whose .mate() value is numerically 0. Lucas represents
+        # that case as mate in 1 once the actual played move is prepended.
+        # Preserve that distinction before applying the normal mate-distance
+        # adjustment.
+        if forced_first_move is not None:
+            if score == chess.engine.MateGiven:
+                mate = 1
+            elif mate > 0:
+                mate += 1
 
         pv = list(info.get("pv", []))
 

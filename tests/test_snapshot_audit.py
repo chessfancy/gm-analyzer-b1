@@ -123,6 +123,31 @@ def test_snapshot_audit_complete_primary_set_has_zero_missing(tmp_path, capsys):
     assert "DEPTH SNAPSHOT AUDIT" in capsys.readouterr().out
 
 
+def test_snapshot_audit_exempts_terminal_post_move_from_checkpoints(tmp_path):
+    terminal_fen = "4R3/6pp/1k6/1p2p3/2n5/8/4q1PP/K2r4 w - - 6 38"
+    db_path, run_id = _fixture(
+        tmp_path,
+        missing_post=set(EXPECTED_DEPTHS),
+        final_depth=0,
+    )
+
+    con = sqlite3.connect(db_path)
+    con.execute(
+        "UPDATE moves SET fen_after=?",
+        (terminal_fen,),
+    )
+    con.commit()
+    con.close()
+
+    audit = snapshot_audit(db_path, run_id, EXPECTED_DEPTHS)
+
+    assert audit["post_move_analyses"] == 1
+    assert audit["post_move_terminal_analyses"] == 1
+    assert audit["post_move_expected"] == 0
+    assert audit["post_move_present"] == 0
+    assert audit["post_move_missing"] == 0
+
+
 def test_snapshot_audit_reports_one_missing_post_move_checkpoint(tmp_path):
     db_path, run_id = _fixture(tmp_path, missing_post={16})
 
