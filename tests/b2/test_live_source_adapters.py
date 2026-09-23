@@ -262,6 +262,39 @@ def test_lichess_html_root_and_event_feed_enumerate_round_and_download_pgn(tmp_p
     ]
 
 
+def test_lichess_explicit_broadcast_html_ignores_unrelated_online_copy():
+    round_url = "https://lichess.test/broadcast/olympiad-open/round-1/open-round-id"
+    html = b"""<!doctype html>
+<html>
+<head><title>Olympiad Open Round 1</title></head>
+<body>
+  <p>Watch other events online.</p>
+  <h1>Olympiad Open Round 1</h1>
+</body>
+</html>
+"""
+    opener = FixtureOpener(
+        {
+            ("GET", "/broadcast/olympiad-open/round-1/open-round-id"):
+                lambda request: _response(html, request.full_url),
+        }
+    )
+    adapter = LichessBroadcastAdapter(
+        base_url="https://lichess.test",
+        opener=opener,
+    )
+    ref = SourceRef(
+        "lichess-broadcast",
+        "broadcast:olympiad-open/event:round-1/round:open-round-id",
+        round_url,
+    )
+
+    descriptor = adapter.describe(ref)
+
+    assert descriptor.is_otb_hint is True
+    assert "Olympiad Open Round 1" in descriptor.title
+
+
 def test_lichess_interrupted_download_is_atomic(tmp_path):
     opener = FixtureOpener(
         _lichess_routes(_fixture("chess_results_games.pgn"), interrupted=True)

@@ -548,8 +548,11 @@ class LichessBroadcastAdapter:
                 raise ValueError(
                     "Lichess result is neither structured JSON nor an HTML broadcast page"
                 )
-            if "online" in body_text.casefold() and "over-the-board" not in body_text.casefold():
-                raise ValueError("Lichess result is marked online, not OTB")
+            # The ref has already been constrained to an explicit Lichess
+            # broadcast route and its round identity validated above. Public
+            # broadcast HTML can contain unrelated site copy such as "online";
+            # scanning the whole page for that word falsely rejects valid OTB
+            # rounds. Online/user-game URLs remain rejected at discovery.
             parser = _TitleParser()
             parser.feed(body_text)
             mapping = {"title": parser.title, "otb": True}
