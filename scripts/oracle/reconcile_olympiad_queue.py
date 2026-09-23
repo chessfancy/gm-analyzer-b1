@@ -13,6 +13,7 @@ import sqlite3
 
 CGM = Path("/home/ubuntu/data/cgm")
 DB = CGM / "coordinator.sqlite"
+FINISHED_STATE = CGM / "state/lichess-olympiad-finished.json"
 OLYMPIAD_MARKER = "46th-fide-chess-olympiad-samarkand-2026"
 PRODUCTION_MIN_PRIORITY = 500
 STALE_PRIORITY = -10000
@@ -51,25 +52,35 @@ def main() -> int:
                 }
             )
 
+        finished_state = {"processed": {}}
+        if FINISHED_STATE.exists():
+            finished_state = json.loads(
+                FINISHED_STATE.read_text(encoding="utf-8")
+            )
+        allowed_revisions = {
+            str(meta["tournament_id"]): int(meta["revision"])
+            for meta in finished_state.get("processed", {}).values()
+            if isinstance(meta, dict)
+            and meta.get("tournament_id")
+            and meta.get("revision") is not None
+        }
+
         promoted = 0
         demoted = 0
         requeued = 0
         latest_revisions: dict[str, int | None] = {}
 
         for tournament_id, jobs in grouped.items():
-            positive_revisions = {
-                job["revision"] for job in jobs if job["plies"] > 0
-            }
-            latest = max(positive_revisions) if positive_revisions else None
-            latest_revisions[tournament_id] = latest
+            allowed = allowed_revisions.get(tournament_id)
+            latest_revisions[tournament_id] = allowed
             priority = PRODUCTION_MIN_PRIORITY + 100 + _round_number(
                 tournament_id
             )
 
             for job in jobs:
                 eligible = (
-                    latest is not None
-                    and job["revision"] == latest
+                    allowed is not None
+                    and job["revision"] == allowed
                     and job["plies"] > 0
                 )
                 if eligible:
