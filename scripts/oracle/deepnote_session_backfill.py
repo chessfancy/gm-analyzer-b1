@@ -155,6 +155,7 @@ def dispatch_test_job(
                     "notebookId": notebook_id,
                     "storageMode": "read_write",
                 },
+                timeout=600,
             )
         finally:
             dn._request_json(

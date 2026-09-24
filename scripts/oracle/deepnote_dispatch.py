@@ -47,7 +47,7 @@ def _headers(*, json_body: bool = False) -> dict[str, str]:
     return headers
 
 
-def _request_json(method: str, path: str, payload=None):
+def _request_json(method: str, path: str, payload=None, *, timeout: int = 60):
     data = None if payload is None else json.dumps(payload).encode()
     req = urllib.request.Request(
         BASE + path,
@@ -55,7 +55,7 @@ def _request_json(method: str, path: str, payload=None):
         headers=_headers(json_body=payload is not None),
         method=method,
     )
-    with urllib.request.urlopen(req, timeout=60) as response:
+    with urllib.request.urlopen(req, timeout=timeout) as response:
         if response.status == 204:
             return None
         return json.load(response)
