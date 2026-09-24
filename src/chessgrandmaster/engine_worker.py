@@ -426,10 +426,13 @@ class LucasEngineWorker:
                 # Never launch Stockfish from an already terminal position.
                 # A checkmating played move is mate in one from the original
                 # mover's POV. Other automatic terminal outcomes are draws.
+                terminal_kind = (
+                    "checkmate" if board_after.is_checkmate() else "draw"
+                )
                 played_response = EngineResponse(
                     uci=played_uci,
                     cp=0,
-                    mate=1 if board_after.is_checkmate() else 0,
+                    mate=1 if terminal_kind == "checkmate" else 0,
                     depth=0,
                     seldepth=0,
                     nodes=0,
@@ -438,6 +441,14 @@ class LucasEngineWorker:
                     pv_uci=played_uci,
                     source_search="post_move",
                     is_played=True,
+                    info_json=info_to_json({
+                        "cgm_synthetic": True,
+                        "cgm_reason": "terminal_post_move",
+                        "cgm_terminal": terminal_kind,
+                        "depth": 0,
+                        "nodes": 0,
+                        "pv": [played_move],
+                    }),
                 )
                 responses.append(played_response)
             else:

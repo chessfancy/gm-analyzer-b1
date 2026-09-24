@@ -446,6 +446,11 @@ def test_checkmating_played_move_is_not_rated_as_blunder():
     assert played.pv_uci == "d3d1"
     assert played.source_search == "post_move"
     assert played.mate == 1
+    synthetic_info = json.loads(played.info_json)
+    assert synthetic_info["cgm_synthetic"] is True
+    assert synthetic_info["cgm_reason"] == "terminal_post_move"
+    assert synthetic_info["cgm_terminal"] == "checkmate"
+    assert synthetic_info["pv"] == ["d3d1"]
     assert result.lucas_loss == 0
     assert result.category == "NO_RATING"
     assert result.nag == 0
