@@ -419,37 +419,56 @@ class LucasEngineWorker:
 
         if played_response is None:
 
-            second_search = True
-
             board_after = board.copy()
             board_after.push(played_move)
 
-            second_depth = self.depth
+            if board_after.is_game_over(claim_draw=False):
+                # Never launch Stockfish from an already terminal position.
+                # A checkmating played move is mate in one from the original
+                # mover's POV. Other automatic terminal outcomes are draws.
+                played_response = EngineResponse(
+                    uci=played_uci,
+                    cp=0,
+                    mate=1 if board_after.is_checkmate() else 0,
+                    depth=0,
+                    seldepth=0,
+                    nodes=0,
+                    nps=0,
+                    time_ms=0,
+                    pv_uci=played_uci,
+                    source_search="post_move",
+                    is_played=True,
+                )
+                responses.append(played_response)
+            else:
+                second_search = True
 
-            if (
-                not self.depth
-                and not self.nodes
-                and responses
-                and responses[0].depth > 1
-            ):
-                second_depth = responses[0].depth - 1
+                second_depth = self.depth
 
-            post_move_responses, post_move_snapshots = self._stream_search(
-                board_after,
-                pov_color,
-                "post_move",
-                forced_first_move=played_move,
-                search_depth=second_depth,
-                game_token=game_token,
-                telemetry_context=telemetry_context,
-            )
+                if (
+                    not self.depth
+                    and not self.nodes
+                    and responses
+                    and responses[0].depth > 1
+                ):
+                    second_depth = responses[0].depth - 1
 
-            played_response = post_move_responses[0]
+                post_move_responses, post_move_snapshots = self._stream_search(
+                    board_after,
+                    pov_color,
+                    "post_move",
+                    forced_first_move=played_move,
+                    search_depth=second_depth,
+                    game_token=game_token,
+                    telemetry_context=telemetry_context,
+                )
 
-            played_response.is_played = True
+                played_response = post_move_responses[0]
 
-            responses.append(played_response)
-            depth_snapshots.extend(post_move_snapshots)
+                played_response.is_played = True
+
+                responses.append(played_response)
+                depth_snapshots.extend(post_move_snapshots)
 
 
         # -------------------------------------------

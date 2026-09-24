@@ -433,26 +433,81 @@ def test_checkmating_played_move_is_not_rated_as_blunder():
             pv=("e2b2",),
         )
     ]
-    post_move = [
-        {
-            "depth": 0,
-            "multipv": 1,
-            "score": chess.engine.PovScore(chess.engine.Mate(0), chess.WHITE),
-            "pv": [],
-        }
-    ]
 
     worker = _worker([], depth=19)
-    worker.engine = SequencedFakeEngine([primary, post_move])
+    worker.engine = SequencedFakeEngine([primary])
 
     result = worker.analyze_move(fen_before, "d3d1")
 
     played = next(response for response in result.responses if response.is_played)
+    assert len(worker.engine.analysis_calls) == 1
+    assert result.second_search is False
     assert played.uci == "d3d1"
+    assert played.pv_uci == "d3d1"
+    assert played.source_search == "post_move"
     assert played.mate == 1
     assert result.lucas_loss == 0
     assert result.category == "NO_RATING"
     assert result.nag == 0
+
+
+def test_olympiad_qh7_mate_does_not_launch_terminal_post_move_search():
+    fen_before = (
+        "r1b2qnQ/pp4p1/1b2p1k1/1P1pPrN1/4n3/"
+        "P7/2P3PP/R1B2R1K w - - 0 25"
+    )
+    primary = [
+        _info(
+            depth=19,
+            score=chess.engine.PovScore(chess.engine.Cp(500), chess.WHITE),
+            wdl=None,
+            pv=("h8g8",),
+        )
+    ]
+
+    worker = _worker([], depth=19)
+    worker.engine = SequencedFakeEngine([primary])
+
+    result = worker.analyze_move(fen_before, "h8h7")
+
+    played = next(response for response in result.responses if response.is_played)
+    assert len(worker.engine.analysis_calls) == 1
+    assert result.second_search is False
+    assert played.uci == "h8h7"
+    assert played.pv_uci == "h8h7"
+    assert played.mate == 1
+    assert played.depth == 0
+    assert played.nodes == 0
+    assert result.played_rank == 0
+    assert result.lucas_loss == 0
+    assert result.category == "NO_RATING"
+    assert result.nag == 0
+
+
+def test_stalemating_played_move_does_not_launch_terminal_post_move_search():
+    fen_before = "8/8/8/8/8/k7/8/KQ6 w - - 0 1"
+    primary = [
+        _info(
+            depth=19,
+            score=chess.engine.PovScore(chess.engine.Cp(900), chess.WHITE),
+            wdl=None,
+            pv=("b1b2",),
+        )
+    ]
+
+    worker = _worker([], depth=19)
+    worker.engine = SequencedFakeEngine([primary])
+
+    result = worker.analyze_move(fen_before, "b1b5")
+
+    played = next(response for response in result.responses if response.is_played)
+    assert len(worker.engine.analysis_calls) == 1
+    assert result.second_search is False
+    assert played.uci == "b1b5"
+    assert played.cp == 0
+    assert played.mate == 0
+    assert played.depth == 0
+    assert played.nodes == 0
 
 
 def test_post_move_snapshots_use_original_mover_pov_and_prepended_move():
