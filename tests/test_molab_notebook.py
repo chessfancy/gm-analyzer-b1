@@ -87,3 +87,14 @@ def test_molab_analysis_uses_depth_19_hash_and_snapshot_policy():
     assert "Depth: 19" in text
     assert "Time limit: OFF" in text
     assert "Snapshot depths: 12, 14, 16, 18, 19" in text
+
+
+def test_molab_can_download_verified_oracle_workload():
+    text = NOTEBOOK.read_text(encoding="utf-8")
+
+    assert "Download Oracle workload" in text
+    assert "http://149.118.50.253/molab-workload.pgn" in text
+    assert '_url + ".sha256"' in text
+    assert "SHA256 mismatch" in text
+    assert 'data_root / "input.pgn"' in text
+    assert 'data_root / "molab-workload.json"' in text

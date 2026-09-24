@@ -42,7 +42,8 @@ def _(mo):
            package, install and verify the pinned Stockfish 19 binary.
         2. Optionally click **Export platform JSON** and upload
            `cgm_molab_data/molab_platform.json` for worker selection.
-        3. Upload a PGN with Molab's file browser and paste its path below.
+        3. Prefer **Download Oracle workload** to fetch and SHA-256 verify the
+           current Molab assignment directly from Oracle. Manual upload still works.
         4. Click **Analyze PGN**. Molab uses the provider policy of
            **4 workers**, Threads/worker=1, Hash/worker=1536 MB, depth=19,
            no time limit, and snapshots at depths 12, 14, 16, 18 and 19.
@@ -295,6 +296,104 @@ print(json.dumps({
         """
     )
     return (platform_report_path,)
+
+
+@app.cell
+def _(data_root, mo):
+    workload_url = mo.ui.text(
+        label="Oracle workload URL",
+        value="http://149.118.50.253/molab-workload.pgn",
+        full_width=True,
+    )
+    fetch_button = mo.ui.run_button(
+        label="Download Oracle workload",
+        kind="success",
+    )
+    mo.vstack([workload_url, fetch_button])
+    return fetch_button, workload_url
+
+
+@app.cell
+def _(data_root, fetch_button, mo, workload_url):
+    mo.stop(
+        not fetch_button.value,
+        mo.md("Click **Download Oracle workload** to fetch the current assignment."),
+    )
+
+    import hashlib
+    import urllib.request
+
+    _url = workload_url.value.strip()
+    if not _url.startswith(("http://", "https://")):
+        raise ValueError("Oracle workload URL must use http:// or https://")
+    data_root.mkdir(parents=True, exist_ok=True)
+    _dest = data_root / "input.pgn"
+    _tmp = data_root / ".input.pgn.download"
+    _tmp.unlink(missing_ok=True)
+
+    _hash = hashlib.sha256()
+    _bytes = 0
+    with urllib.request.urlopen(_url, timeout=120) as _response, _tmp.open("wb") as _out:
+        while True:
+            _chunk = _response.read(1024 * 1024)
+            if not _chunk:
+                break
+            _out.write(_chunk)
+            _hash.update(_chunk)
+            _bytes += len(_chunk)
+
+    _actual_sha = _hash.hexdigest()
+    _expected_sha = None
+    try:
+        with urllib.request.urlopen(_url + ".sha256", timeout=30) as _response:
+            _checksum_text = _response.read().decode("utf-8").strip()
+        if _checksum_text:
+            _expected_sha = _checksum_text.split()[0].lower()
+    except Exception:
+        _expected_sha = None
+
+    if _expected_sha and _actual_sha != _expected_sha:
+        _tmp.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"SHA256 mismatch: expected {_expected_sha}, got {_actual_sha}"
+        )
+    _tmp.replace(_dest)
+
+    _manifest_path = data_root / "molab-workload.json"
+    _manifest_url = (
+        _url[:-4] + ".json" if _url.lower().endswith(".pgn") else _url + ".json"
+    )
+    _manifest_status = "not available"
+    try:
+        with urllib.request.urlopen(_manifest_url, timeout=30) as _response:
+            _manifest_bytes = _response.read()
+        _manifest_path.write_bytes(_manifest_bytes)
+        _manifest_status = str(_manifest_path)
+    except Exception:
+        pass
+
+    workload_download = {
+        "url": _url,
+        "path": str(_dest),
+        "bytes": _bytes,
+        "sha256": _actual_sha,
+        "expected_sha256": _expected_sha,
+        "manifest": _manifest_status,
+    }
+
+    _verified = "verified" if _expected_sha else "downloaded (checksum endpoint unavailable)"
+    mo.md(
+        f"""
+        ## Oracle workload ready
+
+        - File: `{workload_download['path']}`
+        - Bytes: `{workload_download['bytes']}`
+        - SHA-256: `{workload_download['sha256']}`
+        - Integrity: **{_verified}**
+        - Manifest: `{workload_download['manifest']}`
+        """
+    )
+    return (workload_download,)
 
 
 @app.cell
