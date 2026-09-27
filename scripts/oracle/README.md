@@ -166,3 +166,7 @@ hash and input identity before marking a job `COMPLETED`. No unauthenticated
 HTTP result-upload endpoint is exposed. Legacy flat-PGN manual outputs are not
 silently converted into completed jobs; recover them only after their actual
 files are available for a separately verified conversion.
+
+## Deepnote manual bridge
+
+`run_deepnote_manual_bridge.sh` polls Deepnote project storage for `cgm-manual/outbox/ready.json`. A verified result is imported through the coordinator before the bridge publishes the next manual batch to `cgm-manual/inbox/current-batch.zip`. The Deepnote notebook holds no Oracle credential; Oracle uses its existing Deepnote API secret for both directions. See `docs/deepnote-manual-bridge.md`.
