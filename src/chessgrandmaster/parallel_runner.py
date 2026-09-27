@@ -447,8 +447,13 @@ class ParallelLucasRunner:
                     self.processes
                     and all(not process.is_alive() for process in self.processes)
                 ):
+                    exitcodes = ", ".join(
+                        f"worker={index} exitcode={process.exitcode}"
+                        for index, process in enumerate(self.processes)
+                    )
                     raise RuntimeError(
-                        "Stockfish worker exited before reporting all results"
+                        "Stockfish worker exited before reporting all results; "
+                        + exitcodes
                     )
                 continue
 

@@ -39,9 +39,9 @@ def execute_job(bundle: Path, result_root: Path, provider: str) -> Path:
     result_root.mkdir(parents=True)
 
     work_root = result_root.parent / f".{result_root.name}-work"
-    if work_root.exists():
-        shutil.rmtree(work_root)
-    work_root.mkdir(parents=True)
+    # Keep an interrupted pipeline work root so production_pipeline can resume
+    # from its existing SQLite state instead of recomputing completed plies.
+    work_root.mkdir(parents=True, exist_ok=True)
 
     summary = run_pipeline(
         validated.path / "input.pgn",

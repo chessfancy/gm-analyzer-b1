@@ -190,3 +190,73 @@ def test_manual_worker_executes_each_job_and_resumes_verified_results(tmp_path: 
     assert payload["schema_version"] == "cgm-manual-result-batch-1"
     assert [item["job_id"] for item in payload["results"]] == ["job-0", "job-1"]
     assert (tmp_path / "results" / "checksums.json").is_file()
+
+
+def load_job_executor_module():
+    import importlib.util
+    import sys
+
+    path = Path(__file__).resolve().parents[2] / "scripts" / "workers" / "run_job_bundle.py"
+    spec = importlib.util.spec_from_file_location("cgm_run_job_bundle", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_job_executor_preserves_partial_work_root_for_pipeline_resume(tmp_path: Path, monkeypatch):
+    bundle = make_job_bundle(tmp_path / "bundle", "job-0", "fp-0")
+    result = tmp_path / "results" / "0000"
+    work_root = result.parent / ".0000-work"
+    work_root.mkdir(parents=True)
+    marker = work_root / "resume-marker.txt"
+    marker.write_text("keep", encoding="utf-8")
+    module = load_job_executor_module()
+
+    def fake_run_pipeline(input_pgn, *, root, **kwargs):
+        root = Path(root)
+        assert (root / "resume-marker.txt").read_text(encoding="utf-8") == "keep"
+        db = root / "db" / "analysis.sqlite"
+        db.parent.mkdir(parents=True, exist_ok=True)
+        db.write_bytes(b"sqlite")
+        out = root / "output"
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "Mistakes_test.pgn").write_text("", encoding="utf-8")
+        (out / "Blunders_test.pgn").write_text("", encoding="utf-8")
+        uci = root / "uci" / "run_1"
+        uci.mkdir(parents=True, exist_ok=True)
+        (uci / "trace.jsonl.gz").write_bytes(b"uci")
+        return {"database": str(db), "run_id": 1, "games": 1, "moves": 2,
+                "mistakes": {}, "blunders": {}}
+
+    monkeypatch.setattr(module, "run_pipeline", fake_run_pipeline)
+    out = module.execute_job(bundle, result, "deepnote")
+    assert out == result.resolve()
+    assert (out / "analysis.sqlite").is_file()
+
+
+def test_dead_worker_error_reports_exit_codes(monkeypatch):
+    from chessgrandmaster.parallel_runner import ParallelLucasRunner
+    import queue
+
+    class DeadProcess:
+        exitcode = -9
+        def is_alive(self):
+            return False
+
+    class SinkQueue:
+        def put_nowait(self, value):
+            return None
+
+    runner = ParallelLucasRunner("/bin/false", workers=1, depth=19)
+    runner.result_queue = queue.Queue()
+
+    def fake_start():
+        runner.processes = [DeadProcess()]
+        runner.job_queues = [SinkQueue()]
+
+    monkeypatch.setattr(runner, "start", fake_start)
+    jobs = [{"job_id": "j", "game_id": 1, "ply": 1, "fen_before": "x", "played_uci": "y"}]
+    with pytest.raises(RuntimeError, match=r"exitcode=-9"):
+        list(runner.iter_analyze(jobs))
