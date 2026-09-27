@@ -299,6 +299,104 @@ print(json.dumps({
 
 
 @app.cell
+def _(mo):
+    coordinator_batch_url = mo.ui.text(
+        label="Oracle coordinator batch URL",
+        value="http://149.118.50.253/molab-batch.zip",
+        full_width=True,
+    )
+    coordinator_fetch_button = mo.ui.run_button(
+        label="Download Oracle coordinator batch",
+        kind="success",
+    )
+    mo.vstack([coordinator_batch_url, coordinator_fetch_button])
+    return coordinator_batch_url, coordinator_fetch_button
+
+
+@app.cell
+def _(coordinator_batch_url, coordinator_fetch_button, data_root, mo):
+    mo.stop(
+        not coordinator_fetch_button.value,
+        mo.md("Click **Download Oracle coordinator batch** to fetch immutable job bundles."),
+    )
+    import hashlib
+    import urllib.request
+
+    _url = coordinator_batch_url.value.strip()
+    if not _url.startswith(("http://", "https://")):
+        raise ValueError("Oracle batch URL must use http:// or https://")
+    _dest = data_root / "manual-batch.zip"
+    _tmp = data_root / ".manual-batch.zip.download"
+    _tmp.unlink(missing_ok=True)
+    _hash = hashlib.sha256()
+    with urllib.request.urlopen(_url, timeout=120) as _response, _tmp.open("wb") as _out:
+        while True:
+            _chunk = _response.read(1024 * 1024)
+            if not _chunk:
+                break
+            _out.write(_chunk)
+            _hash.update(_chunk)
+    _actual = _hash.hexdigest()
+    with urllib.request.urlopen(_url + ".sha256", timeout=30) as _response:
+        _expected = _response.read().decode("utf-8").strip().split()[0].lower()
+    if _actual != _expected:
+        _tmp.unlink(missing_ok=True)
+        raise RuntimeError(f"SHA256 mismatch: expected {_expected}, got {_actual}")
+    _tmp.replace(_dest)
+    coordinator_batch_download = {"path": str(_dest), "sha256": _actual}
+    mo.md(f"## Coordinator batch ready\n- `{_dest}`\n- SHA-256 verified: `{_actual}`")
+    return (coordinator_batch_download,)
+
+
+@app.cell
+def _(coordinator_batch_download, mo):
+    coordinator_run_button = mo.ui.run_button(
+        label="Run coordinator batch + package results",
+        kind="success",
+    )
+    mo.stop(not coordinator_batch_download, mo.md("Download a coordinator batch first."))
+    coordinator_run_button
+    return (coordinator_run_button,)
+
+
+@app.cell
+def _(coordinator_batch_download, coordinator_run_button, data_root, mo, os, repo_dir, setup_status, subprocess, venv_dir):
+    mo.stop(
+        not coordinator_run_button.value,
+        mo.md("Click **Run coordinator batch + package results** when ready."),
+    )
+    _runner = repo_dir / "scripts" / "workers" / "run_manual_batch.py"
+    _python = venv_dir / "bin" / "python"
+    _result_dir = data_root / "manual-results"
+    _archive = data_root / "manual-results.zip"
+    _env = os.environ.copy()
+    _env["CGM_VENV"] = str(venv_dir)
+    _env["CGM_HOME"] = str(data_root)
+    _env["CGM_STOCKFISH"] = setup_status["engine"]
+    _proc = subprocess.run(
+        [str(_python), str(_runner), "--batch-archive", coordinator_batch_download["path"],
+         "--result", str(_result_dir), "--archive", str(_archive)],
+        cwd=repo_dir, env=_env, text=True, capture_output=True, check=True,
+    )
+    coordinator_result = json.loads(_proc.stdout.strip().splitlines()[-1])
+    _sha_path = data_root / "manual-results.zip.sha256"
+    if not _archive.is_file() or not _sha_path.is_file():
+        raise RuntimeError("manual result archive was not created")
+    mo.md(
+        f"""## Coordinator result package ready
+
+- Results: `{_archive}`
+- Checksum: `{_sha_path}`
+- Jobs executed: `{coordinator_result['executed']}`
+- Jobs resumed/skipped: `{coordinator_result['skipped']}`
+
+Download **both** files and copy the ZIP back to Oracle; Oracle will verify every inner job before marking it complete.
+"""
+    )
+    return (coordinator_result,)
+
+
+@app.cell
 def _(data_root, mo):
     workload_url = mo.ui.text(
         label="Oracle workload URL",

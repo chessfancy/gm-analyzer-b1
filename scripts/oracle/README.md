@@ -116,3 +116,53 @@ It produces:
 - raw UCI archive
 - `job-result.json`
 - `checksums.json`
+
+## Continuous general backfill refill
+
+`refill_backfill_queue.py` bridges the authoritative B2 registry to the
+distributed coordinator after urgent Olympiad work is exhausted. By default it
+only selects canonical Chess-Results tournaments, refills when fewer than 8
+priority-500 jobs remain, and fills to at least 24 jobs using 1800-ply shards.
+
+```bash
+cd ~/projects/gm-analyzer-b1
+PYTHONPATH=src .venv/bin/python scripts/oracle/refill_backfill_queue.py
+```
+
+`run_backfill_refill.sh` wraps the command with `flock` for cron. Existing
+Kaggle/Codespaces dispatchers need no source-specific changes: they lease the
+new priority-500 jobs through the same immutable coordinator contract. Higher
+Olympiad priorities continue to preempt general backfill naturally.
+
+## Manual Deepnote / Molab result round-trip
+
+Manual production runs use job bundles, not one concatenated PGN. Create and
+publish a batch on Oracle:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/oracle/manual_batch.py create molab --max-jobs 8
+PYTHONPATH=src .venv/bin/python scripts/oracle/manual_batch.py create deepnote --max-jobs 8
+```
+
+The command publishes `molab-batch.zip` or `deepnote-batch.zip` plus a SHA256
+file under `~/data/cgm/distribution`. On the remote worker, run:
+
+```bash
+python scripts/workers/run_manual_batch.py \
+  --batch-archive manual-batch.zip \
+  --result manual-results \
+  --archive manual-results.zip
+```
+
+The runner is resumable and produces one verified `cgm-job-result-1` bundle
+per coordinator job. Copy the single result ZIP back to Oracle and import it:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/oracle/manual_batch.py import /path/to/manual-results.zip
+```
+
+Oracle verifies the outer archive plus every inner checksum, job id, config
+hash and input identity before marking a job `COMPLETED`. No unauthenticated
+HTTP result-upload endpoint is exposed. Legacy flat-PGN manual outputs are not
+silently converted into completed jobs; recover them only after their actual
+files are available for a separately verified conversion.
