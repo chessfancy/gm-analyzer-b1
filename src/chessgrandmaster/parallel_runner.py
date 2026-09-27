@@ -451,11 +451,31 @@ class ParallelLucasRunner:
                         f"worker={index} exitcode={process.exitcode}"
                         for index, process in enumerate(self.processes)
                     )
-                    raise RuntimeError(
-                        "Stockfish worker exited before reporting all results; "
-                        + exitcodes
-                    )
-                continue
+                    abnormal = [
+                        process
+                        for process in self.processes
+                        if process.exitcode not in (0, None)
+                    ]
+                    if abnormal:
+                        raise RuntimeError(
+                            "Stockfish worker exited before reporting all results; "
+                            + exitcodes
+                        )
+
+                    # multiprocessing.Queue uses a feeder thread. A child can
+                    # exit cleanly before its final worker_finished message is
+                    # observable by the parent. Give clean exits one bounded
+                    # grace read so the archive manifest can arrive instead of
+                    # misclassifying normal finalization as a worker crash.
+                    try:
+                        message = self.result_queue.get(timeout=5)
+                    except queue.Empty:
+                        raise RuntimeError(
+                            "Stockfish workers exited cleanly but final queue "
+                            "messages did not arrive; " + exitcodes
+                        )
+                else:
+                    continue
 
             result = handle_message(message)
             if result is not None:

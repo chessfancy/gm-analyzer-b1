@@ -236,6 +236,60 @@ def test_job_executor_preserves_partial_work_root_for_pipeline_resume(tmp_path: 
     assert (out / "analysis.sqlite").is_file()
 
 
+def test_clean_worker_exit_allows_late_finished_message(monkeypatch):
+    from chessgrandmaster.parallel_runner import ParallelLucasRunner
+    import queue
+
+    class CleanProcess:
+        exitcode = 0
+        def is_alive(self):
+            return False
+
+    class SinkQueue:
+        def put_nowait(self, value):
+            return None
+
+    class LateResultQueue:
+        def __init__(self):
+            self.nonblocking_calls = 0
+            self.blocking_calls = 0
+
+        def get_nowait(self):
+            self.nonblocking_calls += 1
+            if self.nonblocking_calls == 1:
+                return {
+                    "type": "job_result",
+                    "ok": True,
+                    "job_id": "j",
+                }
+            raise queue.Empty
+
+        def get(self, timeout=None):
+            self.blocking_calls += 1
+            if self.blocking_calls == 1:
+                raise queue.Empty
+            return {
+                "type": "worker_finished",
+                "worker_id": 0,
+                "engine_session_id": "session",
+                "archive_manifest": None,
+            }
+
+    runner = ParallelLucasRunner("/bin/false", workers=1, depth=19)
+    runner.result_queue = LateResultQueue()
+
+    def fake_start():
+        runner.processes = [CleanProcess()]
+        runner.job_queues = [SinkQueue()]
+
+    monkeypatch.setattr(runner, "start", fake_start)
+    jobs = [{"job_id": "j", "game_id": 1, "ply": 1}]
+    results = list(runner.iter_analyze(jobs))
+
+    assert [item["job_id"] for item in results] == ["j"]
+    assert runner.result_queue.blocking_calls == 2
+
+
 def test_dead_worker_error_reports_exit_codes(monkeypatch):
     from chessgrandmaster.parallel_runner import ParallelLucasRunner
     import queue
