@@ -5,9 +5,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
+import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
+import subprocess
+import sys
+
+from chessgrandmaster.engine_manifest import resolve_installed_engine
 
 from .manual_batch import archive_directory, safe_extract_zip
 from .deepnote_manual_bridge import CURRENT_ARCHIVE, CURRENT_POINTER, READY_POINTER
@@ -35,6 +41,34 @@ def _atomic_json(path: Path, payload: dict[str, object]) -> None:
     temp = path.with_name(f".{path.name}.tmp")
     temp.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")), encoding="utf-8")
     temp.replace(path)
+
+
+def ensure_deepnote_runtime_ready(*, repo_root: str | Path | None = None) -> Path:
+    """Ensure the managed Stockfish binary exists in a fresh Deepnote runtime."""
+
+    try:
+        return Path(resolve_installed_engine())
+    except FileNotFoundError:
+        pass
+
+    repo = (
+        Path(repo_root).expanduser().resolve()
+        if repo_root is not None
+        else Path(__file__).resolve().parents[3]
+    )
+    setup = repo / "scripts/setup_platform.sh"
+    if not setup.is_file():
+        raise FileNotFoundError(f"Deepnote setup script not found: {setup}")
+
+    env = os.environ.copy()
+    env["CGM_VENV"] = str(Path(sys.prefix))
+    env["CGM_BOOTSTRAP_PYTHON"] = str(Path(sys.executable))
+    env["CGM_INSTALL_DEV"] = "0"
+    if importlib.util.find_spec("chess") is not None:
+        env["CGM_SKIP_PACKAGE_INSTALL"] = "1"
+
+    subprocess.run(["bash", str(setup)], cwd=repo, env=env, check=True)
+    return Path(resolve_installed_engine())
 
 
 def _load_manual_runner():
@@ -84,6 +118,8 @@ def run_deepnote_manual_cycle(
     if str(batch_payload.get("batch_id")) != batch_id:
         raise ValueError("Deepnote current pointer batch_id does not match batch archive")
 
+    if executor is None:
+        ensure_deepnote_runtime_ready()
     summary = _load_manual_runner()(batch_dir, result_dir, executor=executor)
     outbox = work_root / "cgm-manual/outbox"
     outbox.mkdir(parents=True, exist_ok=True)

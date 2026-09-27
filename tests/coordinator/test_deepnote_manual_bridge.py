@@ -177,3 +177,45 @@ def test_oracle_bridge_imports_ready_result_and_publishes_next_batch(tmp_path: P
     assert current["batch_id"] != first.batch_id
     assert current["jobs"] == 1
     assert READY_POINTER not in storage.files
+
+
+def test_deepnote_runtime_bootstraps_engine_when_missing(tmp_path, monkeypatch):
+    import chessgrandmaster.coordinator.deepnote_manual_worker as worker
+
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "scripts/setup_platform.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    venv = tmp_path / "venv"
+    python = venv / "bin/python"
+    python.parent.mkdir(parents=True)
+    python.write_text("", encoding="utf-8")
+    engine = tmp_path / "stockfish"
+    state = {"installed": False}
+    calls = []
+
+    def resolver():
+        if not state["installed"]:
+            raise FileNotFoundError("missing engine")
+        return engine
+
+    def fake_run(command, *, cwd, env, check):
+        calls.append((command, cwd, dict(env), check))
+        state["installed"] = True
+        engine.write_text("stockfish", encoding="utf-8")
+
+    monkeypatch.setattr(worker, "resolve_installed_engine", resolver)
+    monkeypatch.setattr(worker.subprocess, "run", fake_run)
+    monkeypatch.setattr(worker.sys, "prefix", str(venv))
+    monkeypatch.setattr(worker.sys, "executable", str(python))
+
+    resolved = worker.ensure_deepnote_runtime_ready(repo_root=repo)
+
+    assert resolved == engine
+    assert len(calls) == 1
+    command, cwd, env, check = calls[0]
+    assert command == ["bash", str(repo / "scripts/setup_platform.sh")]
+    assert cwd == repo
+    assert env["CGM_VENV"] == str(venv)
+    assert env["CGM_BOOTSTRAP_PYTHON"] == str(python)
+    assert env["CGM_INSTALL_DEV"] == "0"
+    assert check is True
