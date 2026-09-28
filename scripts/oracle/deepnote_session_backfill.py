@@ -18,7 +18,7 @@ from chessgrandmaster.coordinator import Coordinator
 
 
 HOME = Path.home()
-REPO = HOME / "projects/gm-analyzer-b1"
+REPO = Path(__file__).resolve().parents[2]
 TEST_ROOT = HOME / "data/cgm/deepnote-session-test"
 COORD_DB = TEST_ROOT / "coordinator.sqlite"
 ARCHIVE = TEST_ROOT / "archive"
@@ -61,47 +61,31 @@ def _choose_session_block(notebook: dict) -> str:
     return block_id
 
 
-def _wait_run(run_id: str, poll_seconds: int, timeout_seconds: int) -> dict:
-    deadline = time.monotonic() + timeout_seconds
-    terminal = {"success", "error", "internal_error", "stopped"}
-    while True:
-        if time.monotonic() >= deadline:
-            raise TimeoutError(f"Deepnote session run timed out: {run_id}")
-        run = dn._request_json("GET", f"/runs/{run_id}")["run"]
-        status = str(run.get("status", "")).lower()
-        print(
-            json.dumps(
-                {
-                    "event": "session_run_status",
-                    "run_id": run_id,
-                    "status": status,
-                    "checked_at": time.time(),
-                },
-                sort_keys=True,
-            ),
-            flush=True,
-        )
-        if status in terminal:
-            return run
-        time.sleep(poll_seconds)
+def _request_session_json(method: str, path: str, payload=None, *, timeout: int = 60):
+    return dn._request_json(method, path, payload, timeout=timeout)
 
 
-def _stop_session(session_id: str) -> None:
-    try:
-        dn._request_json("DELETE", f"/sessions/{session_id}")
-    except Exception as exc:
-        print(f"SESSION_STOP_WARNING {exc}", flush=True)
-
-
-def dispatch_test_job(
+def _session_remote_code(
     *,
-    poll_seconds: int = 60,
-    timeout_seconds: int = 172800,
+    job_dir: str,
+    result_zip: str,
+    repo_sha: str,
+    session_tag: str,
+) -> str:
+    return dn._remote_code(job_dir, result_zip, repo_sha, session_tag)
+
+
+def run_session_once(
+    *,
+    poll_seconds: int = 10,
+    timeout_seconds: int = 14400,
+    keep_remote: bool = False,
+    min_priority: int | None = None,
+    max_plies: int | None = None,
 ) -> int:
     cfg = json.loads(CONFIG.read_text(encoding="utf-8"))
     project_id = cfg["project_id"]
-    notebook_id = cfg["notebook_id"]
-    source_block_id = cfg["block_id"]
+    source_notebook_id = cfg["notebook_id"]
 
     repo_sha = subprocess.check_output(
         ["git", "rev-parse", "HEAD"],
@@ -112,19 +96,19 @@ def dispatch_test_job(
     coordinator = Coordinator(COORD_DB, archive_root=ARCHIVE)
     lease = coordinator.lease_next(
         "deepnote-session-api",
-        "deepnote",
-        lease_seconds=timeout_seconds + 3600,
+        "deepnote-session-api",
+        lease_seconds=timeout_seconds + 1800,
+        min_priority=min_priority,
+        max_plies=max_plies,
     )
     if lease is None:
-        print(json.dumps({"ok": True, "message": "no pending session test job"}))
+        print(json.dumps({"ok": True, "message": "no pending job"}))
         return 0
 
-    attempt_tag = f"session-attempt-{lease.attempt_id}-{uuid.uuid4().hex[:8]}"
-    export_dir = EXPORTS / attempt_tag
-    remote_dir = f"cgm-session-test/jobs/{attempt_tag}"
-    remote_zip = f"cgm-session-test/results/{attempt_tag}.zip"
-    local_zip = IMPORTS / f"{attempt_tag}.zip"
-    extract_dir = IMPORTS / attempt_tag
+    session_tag = f"session-{lease.attempt_id}-{uuid.uuid4().hex[:8]}"
+    export_dir = EXPORTS / session_tag
+    remote_dir = f"cgm-session/jobs/{session_tag}"
+    remote_zip = f"cgm-session/results/{session_tag}.zip"
     uploaded_paths: list[str] = []
     session_id: str | None = None
 
@@ -132,150 +116,105 @@ def dispatch_test_job(
         if export_dir.exists():
             shutil.rmtree(export_dir)
         coordinator.export_job(lease.job_id, export_dir)
+        for local in sorted(export_dir.iterdir()):
+            if local.is_file():
+                uploaded_paths.append(
+                    dn._upload_file(project_id, f"{remote_dir}/{local.name}", local)
+                )
 
-        for source in sorted(export_dir.iterdir()):
-            if source.is_file():
-                remote_path = f"{remote_dir}/{source.name}"
-                uploaded = dn._upload_file(project_id, remote_path, source)
-                uploaded_paths.append(uploaded)
-
-        # Create the session from a harmless source notebook. The session gets
-        # its own notebook copy, so the long-running worker code is patched
-        # only into that copy. The source notebook remains idle afterwards.
-        dn._request_json(
-            "PATCH",
-            f"/blocks/{source_block_id}",
-            {"content": "print('CGM session bootstrap')"},
+        created = _request_session_json(
+            "POST",
+            "/sessions",
+            {"notebookId": source_notebook_id},
         )
-        try:
-            created = dn._request_json(
-                "POST",
-                "/sessions",
-                {
-                    "notebookId": notebook_id,
-                    "storageMode": "read_write",
-                },
-                timeout=600,
-            )
-        finally:
-            dn._request_json(
-                "PATCH",
-                f"/blocks/{source_block_id}",
-                {"content": "print('CGM session source idle')"},
-            )
-
-        session_id, source_notebook_id, session_notebook_id = _session_fields(created)
-        session_notebook = dn._request_json(
-            "GET",
-            f"/notebooks/{session_notebook_id}",
+        session_id, returned_source, session_notebook_id = _session_fields(created)
+        if returned_source != source_notebook_id:
+            raise RuntimeError("Deepnote session source notebook identity mismatch")
+        session_notebook = _request_session_json(
+            "GET", f"/notebooks/{session_notebook_id}"
         )["notebook"]
-        session_block_id = _choose_session_block(session_notebook)
-
-        worker_code = dn._remote_code(
-            remote_dir,
-            remote_zip,
-            repo_sha,
-            attempt_tag,
+        block_id = _choose_session_block(session_notebook)
+        code = _session_remote_code(
+            job_dir=remote_dir,
+            result_zip=remote_zip,
+            repo_sha=repo_sha,
+            session_tag=session_tag,
         )
-        dn._request_json(
-            "PATCH",
-            f"/blocks/{session_block_id}",
-            {"content": worker_code},
-        )
-        submitted = dn._request_json(
+        _request_session_json("PATCH", f"/blocks/{block_id}", {"content": code})
+        started = _request_session_json(
             "POST",
             f"/sessions/{session_id}/runs",
-            {
-                "notebookId": source_notebook_id,
-                "blockIds": [session_block_id],
-            },
+            {"blockId": block_id},
         )
-        run_id = str(submitted["runId"])
+        run_id = str(started.get("runId") or started.get("run", {}).get("id") or "")
+        if not run_id:
+            raise RuntimeError(f"Deepnote session run has no run ID: {started}")
         coordinator.mark_running(lease.job_id)
+        print("SESSION", session_id, "RUN", run_id, lease.job_id, flush=True)
 
-        print(
-            json.dumps(
-                {
-                    "event": "session_started",
-                    "job_id": lease.job_id,
-                    "attempt": lease.attempt_number,
-                    "session_id": session_id,
-                    "session_notebook_id": session_notebook_id,
-                    "run_id": run_id,
-                    "repo_sha": repo_sha,
-                },
-                sort_keys=True,
-            ),
-            flush=True,
-        )
+        deadline = time.monotonic() + timeout_seconds
+        status = ""
+        while status not in {"success", "error", "internal_error", "stopped"}:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"Deepnote session run {run_id} timed out")
+            time.sleep(poll_seconds)
+            response = _request_session_json("GET", f"/runs/{run_id}")
+            status = str(response["run"]["status"])
+            print("STATUS", status, flush=True)
+        if status != "success":
+            raise RuntimeError(f"Deepnote session run {run_id} ended {status}")
 
-        run = _wait_run(run_id, poll_seconds, timeout_seconds)
-        if str(run.get("status", "")).lower() != "success":
-            details = dn._run_error_details(run_id)
-            raise RuntimeError(
-                f"Deepnote session run ended {run.get('status')}: {details}"
-            )
-
-        if local_zip.exists():
-            local_zip.unlink()
+        local_zip = IMPORTS / f"{session_tag}.zip"
         dn._download_file(project_id, remote_zip, local_zip)
-
-        if extract_dir.exists():
-            shutil.rmtree(extract_dir)
-        extract_dir.mkdir(parents=True)
-        dn._safe_extract_zip(local_zip, extract_dir)
-        candidates = list(extract_dir.rglob("job-result.json"))
+        result_root = IMPORTS / session_tag
+        if result_root.exists():
+            shutil.rmtree(result_root)
+        result_root.mkdir(parents=True)
+        dn._safe_extract_zip(local_zip, result_root)
+        candidates = list(result_root.rglob("job-result.json"))
         if len(candidates) != 1:
             raise RuntimeError(
-                f"expected one session job-result.json, got {candidates}"
+                f"expected one Deepnote session job-result.json, got {candidates}"
             )
-
         receipt = coordinator.import_result(candidates[0].parent)
-        print(
-            json.dumps(
-                {
-                    "ok": True,
-                    "provider": "deepnote-session",
-                    "job_id": receipt.job_id,
-                    "attempt": receipt.attempt_number,
-                    "state": receipt.state.value,
-                    "archive": str(receipt.archive_path),
-                    "session_id": session_id,
-                    "run_id": run_id,
-                },
-                sort_keys=True,
-            ),
-            flush=True,
-        )
-        return 0
     except Exception as exc:
-        try:
-            coordinator.fail_attempt(
-                lease.job_id,
-                f"Deepnote session dispatch: {exc}"[:4000],
-                retry=False,
-            )
-        except Exception:
-            pass
+        dn._fail_for_retry(
+            coordinator,
+            lease.job_id,
+            f"Deepnote session: {exc}",
+        )
         raise
-    finally:
-        # Stop the interactive machine only after result verification/import,
-        # or after an explicit failure. No session is intentionally left alive.
-        if session_id:
-            _stop_session(session_id)
+
+    if not keep_remote:
         for remote_path in uploaded_paths:
             dn._delete_file(project_id, remote_path)
         dn._delete_file(project_id, remote_zip)
 
+    print(json.dumps({
+        "ok": True,
+        "provider": "deepnote-session-api",
+        "job_id": receipt.job_id,
+        "attempt": receipt.attempt_number,
+        "state": receipt.state.value,
+        "session_id": session_id,
+    }, sort_keys=True))
+    return 0
+
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--poll-seconds", type=int, default=60)
-    parser.add_argument("--timeout-seconds", type=int, default=172800)
+    parser.add_argument("--poll-seconds", type=int, default=10)
+    parser.add_argument("--timeout-seconds", type=int, default=14400)
+    parser.add_argument("--min-priority", type=int, default=None)
+    parser.add_argument("--max-plies", type=int, default=None)
+    parser.add_argument("--keep-remote", action="store_true")
     args = parser.parse_args(argv)
-    return dispatch_test_job(
+    return run_session_once(
         poll_seconds=args.poll_seconds,
         timeout_seconds=args.timeout_seconds,
+        keep_remote=args.keep_remote,
+        min_priority=args.min_priority,
+        max_plies=args.max_plies,
     )
 
 
