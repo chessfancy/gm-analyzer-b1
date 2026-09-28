@@ -154,6 +154,40 @@ def test_worker_cycle_publishes_project_tree_pointer_without_result_zip(tmp_path
     assert not list((work / "cgm-manual/outbox").glob("*.zip")) if (work / "cgm-manual/outbox").exists() else True
 
 
+def test_deepnote_worker_writes_progress_heartbeat(tmp_path: Path):
+    coordinator = seed_coordinator(tmp_path, 2)
+    batch = create_manual_batch(
+        coordinator=coordinator, destination=tmp_path / "batch",
+        provider="deepnote", max_jobs=2, min_priority=500,
+    )
+    from chessgrandmaster.coordinator.manual_batch import archive_directory
+
+    batch_zip = archive_directory(batch.path, tmp_path / "current-batch.zip")
+    work = tmp_path / "deepnote-work"
+    inbox = work / "cgm-manual/inbox"
+    inbox.mkdir(parents=True)
+    shutil.copy2(batch_zip, inbox / "current-batch.zip")
+    digest = hashlib.sha256((inbox / "current-batch.zip").read_bytes()).hexdigest()
+    (inbox / "current.json").write_text(json.dumps({
+        "schema_version": "cgm-deepnote-current-1",
+        "batch_id": batch.batch_id,
+        "archive_path": "cgm-manual/inbox/current-batch.zip",
+        "sha256": digest,
+    }), encoding="utf-8")
+
+    run_deepnote_manual_cycle(work_root=work, executor=fake_executor)
+
+    progress = json.loads((work / "cgm-manual/runtime" / batch.batch_id / "progress.json").read_text())
+    assert progress["schema_version"] == "cgm-deepnote-progress-1"
+    assert progress["batch_id"] == batch.batch_id
+    assert progress["jobs_total"] == 2
+    assert progress["jobs_completed"] == 2
+    assert progress["state"] == "complete"
+    assert progress["games_completed"] == 2
+    assert progress["plies_completed"] == 4
+    assert progress["updated_at"]
+
+
 def test_oracle_bridge_imports_project_tree_and_publishes_next_batch(tmp_path: Path):
     coordinator = seed_coordinator(tmp_path, 3)
     storage = MemoryStorage()

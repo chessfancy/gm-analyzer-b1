@@ -132,9 +132,50 @@ def run_deepnote_manual_cycle(
     if str(batch_payload.get("batch_id")) != batch_id:
         raise ValueError("Deepnote current pointer batch_id does not match batch archive")
 
+    progress_path = runtime / "progress.json"
+    totals = {"jobs": 0, "games": 0, "plies": 0}
+    for item in batch_payload.get("jobs", []):
+        bundle = batch_dir / str(item["path"])
+        source = json.loads((bundle / "job.json").read_text(encoding="utf-8")).get("input") or {}
+        totals["jobs"] += 1
+        totals["games"] += int(source.get("games") or 0)
+        totals["plies"] += int(source.get("plies") or 0)
+    progress = {
+        "schema_version": "cgm-deepnote-progress-1",
+        "batch_id": batch_id,
+        "state": "running",
+        "jobs_total": totals["jobs"], "jobs_completed": 0,
+        "games_total": totals["games"], "games_completed": 0,
+        "plies_total": totals["plies"], "plies_completed": 0,
+        "executed": 0, "skipped": 0, "last_completed_job": None,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _atomic_json(progress_path, progress)
+
+    def report(event: dict[str, object]) -> None:
+        progress["jobs_completed"] = int(event["completed_jobs"])
+        progress["games_completed"] = int(progress["games_completed"]) + int(event["games"])
+        progress["plies_completed"] = int(progress["plies_completed"]) + int(event["plies"])
+        progress["executed"] = int(event["executed"])
+        progress["skipped"] = int(event["skipped"])
+        progress["last_completed_job"] = str(event["job_id"])
+        progress["updated_at"] = datetime.now(timezone.utc).isoformat()
+        _atomic_json(progress_path, progress)
+
     if executor is None:
         ensure_deepnote_runtime_ready()
-    summary = _load_manual_runner()(batch_dir, result_dir, executor=executor)
+    try:
+        summary = _load_manual_runner()(
+            batch_dir, result_dir, executor=executor, progress_callback=report
+        )
+    except Exception:
+        progress["state"] = "interrupted"
+        progress["updated_at"] = datetime.now(timezone.utc).isoformat()
+        _atomic_json(progress_path, progress)
+        raise
+    progress["state"] = "complete"
+    progress["updated_at"] = datetime.now(timezone.utc).isoformat()
+    _atomic_json(progress_path, progress)
 
     # Result files already live in persistent Deepnote project storage. Do not
     # recompress SQLite + already-gzipped raw-UCI into one giant ZIP. Publish a

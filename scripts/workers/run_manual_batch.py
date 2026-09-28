@@ -44,6 +44,7 @@ def run_manual_batch(
     result_dir: str | Path,
     *,
     executor=None,
+    progress_callback=None,
 ) -> ManualRunSummary:
     batch_dir = Path(batch_dir).resolve()
     result_dir = Path(result_dir).resolve()
@@ -58,8 +59,10 @@ def run_manual_batch(
     executed = 0
     skipped = 0
     result_items: list[dict[str, object]] = []
+    jobs = list(batch.get("jobs", []))
+    total_jobs = len(jobs)
 
-    for item in batch.get("jobs", []):
+    for item in jobs:
         ordinal = int(item["ordinal"])
         bundle = batch_dir / str(item["path"])
         expected = validate_job_bundle(bundle)
@@ -72,11 +75,27 @@ def run_manual_batch(
             else:
                 skipped += 1
                 result_items.append({"ordinal": ordinal, "job_id": expected.job_id, "path": f"results/{ordinal:04d}"})
+                if progress_callback is not None:
+                    source = json.loads((bundle / "job.json").read_text(encoding="utf-8")).get("input") or {}
+                    progress_callback({
+                        "completed_jobs": len(result_items), "total_jobs": total_jobs,
+                        "ordinal": ordinal, "job_id": expected.job_id,
+                        "games": int(source.get("games") or 0), "plies": int(source.get("plies") or 0),
+                        "executed": executed, "skipped": skipped, "was_skipped": True,
+                    })
                 continue
         execute(bundle, result, runtime_provider)
         validate_result_bundle(result, expected_job=expected)
         executed += 1
         result_items.append({"ordinal": ordinal, "job_id": expected.job_id, "path": f"results/{ordinal:04d}"})
+        if progress_callback is not None:
+            source = json.loads((bundle / "job.json").read_text(encoding="utf-8")).get("input") or {}
+            progress_callback({
+                "completed_jobs": len(result_items), "total_jobs": total_jobs,
+                "ordinal": ordinal, "job_id": expected.job_id,
+                "games": int(source.get("games") or 0), "plies": int(source.get("plies") or 0),
+                "executed": executed, "skipped": skipped, "was_skipped": False,
+            })
 
     payload = {
         "schema_version": "cgm-manual-result-batch-1",

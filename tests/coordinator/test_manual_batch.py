@@ -192,6 +192,30 @@ def test_manual_worker_executes_each_job_and_resumes_verified_results(tmp_path: 
     assert (tmp_path / "results" / "checksums.json").is_file()
 
 
+def test_manual_worker_reports_progress_after_each_completed_job(tmp_path: Path):
+    coordinator = seed_coordinator(tmp_path, 2)
+    create_manual_batch(
+        coordinator=coordinator, destination=tmp_path / "batch",
+        provider="deepnote", max_jobs=2, min_priority=500,
+    )
+    runner = load_manual_runner()
+    events = []
+
+    def fake_executor(bundle: Path, result: Path, provider: str) -> Path:
+        return make_result_bundle(result, bundle)
+
+    runner.run_manual_batch(
+        tmp_path / "batch", tmp_path / "results",
+        executor=fake_executor, progress_callback=events.append,
+    )
+
+    assert [event["completed_jobs"] for event in events] == [1, 2]
+    assert all(event["total_jobs"] == 2 for event in events)
+    assert [event["job_id"] for event in events] == ["job-0", "job-1"]
+    assert events[-1]["executed"] == 2
+    assert events[-1]["skipped"] == 0
+
+
 def load_job_executor_module():
     import importlib.util
     import sys
