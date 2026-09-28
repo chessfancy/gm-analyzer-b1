@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - chatgpt-work
+      - fix/deepnote-project-tree
   workflow_dispatch:
 
 permissions:
