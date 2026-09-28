@@ -236,6 +236,56 @@ def test_job_executor_preserves_partial_work_root_for_pipeline_resume(tmp_path: 
     assert (out / "analysis.sqlite").is_file()
 
 
+def test_worker_loop_flushes_result_queue_before_clean_exit(monkeypatch):
+    import chessgrandmaster.parallel_runner as module
+    from types import SimpleNamespace
+
+    class FakeEngine:
+        def __init__(self, *args, **kwargs):
+            pass
+        def analyze_move(self, *args, **kwargs):
+            return SimpleNamespace(
+                played_rank=0, lucas_loss=0, category="NO_RATING", nag=0,
+                second_search=False, responses=[], depth_snapshots=[],
+            )
+        def close(self):
+            pass
+
+    class JobQueue:
+        def __init__(self):
+            self.items = iter([{
+                "job_id": "j", "game_id": 1, "source_game_index": 1,
+                "move_id": 1, "ply": 1, "fen_before": "x", "played_uci": "y",
+            }, None])
+        def get(self):
+            return next(self.items)
+
+    class ResultQueue:
+        def __init__(self):
+            self.messages = []
+            self.closed = False
+            self.joined = False
+        def put(self, message):
+            self.messages.append(message)
+        def close(self):
+            self.closed = True
+        def join_thread(self):
+            assert self.closed
+            self.joined = True
+
+    monkeypatch.setattr(module, "LucasEngineWorker", FakeEngine)
+    results = ResultQueue()
+    module._worker_loop(
+        0, "/bin/false", {
+            "threads": 1, "hash_mb": 16, "multipv": 1, "depth": 19,
+            "time_sec": 0.0, "nodes": 0, "snapshot_depths": (19,),
+        }, JobQueue(), results,
+    )
+    assert [item["type"] for item in results.messages] == ["job_result", "worker_finished"]
+    assert results.closed is True
+    assert results.joined is True
+
+
 def test_clean_worker_exit_allows_late_finished_message(monkeypatch):
     from chessgrandmaster.parallel_runner import ParallelLucasRunner
     import queue

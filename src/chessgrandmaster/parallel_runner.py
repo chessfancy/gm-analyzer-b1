@@ -256,17 +256,28 @@ def _worker_loop(
                         "traceback": traceback.format_exc(),
                     }
 
-        if fatal is not None:
-            result_queue.put(fatal)
-        elif initialized:
-            result_queue.put({
-                "type": "worker_finished",
-                "ok": True,
-                "execution_id": execution_id,
-                "worker_id": worker_id,
-                "engine_session_id": engine_session_id,
-                "archive_manifest": manifest,
-            })
+        try:
+            if fatal is not None:
+                result_queue.put(fatal)
+            elif initialized:
+                result_queue.put({
+                    "type": "worker_finished",
+                    "ok": True,
+                    "execution_id": execution_id,
+                    "worker_id": worker_id,
+                    "engine_session_id": engine_session_id,
+                    "archive_manifest": manifest,
+                })
+        finally:
+            # multiprocessing.Queue uses a background feeder thread in each
+            # producer process. Force that thread to flush every buffered
+            # job_result/finalization message before this worker exits.
+            close_queue = getattr(result_queue, "close", None)
+            if callable(close_queue):
+                close_queue()
+            join_queue = getattr(result_queue, "join_thread", None)
+            if callable(join_queue):
+                join_queue()
 
 
 class ParallelLucasRunner:
