@@ -236,7 +236,7 @@ def test_job_executor_preserves_partial_work_root_for_pipeline_resume(tmp_path: 
     assert (out / "analysis.sqlite").is_file()
 
 
-def test_worker_loop_flushes_result_queue_before_clean_exit(monkeypatch):
+def test_worker_loop_sends_results_over_synchronous_connection(monkeypatch):
     import chessgrandmaster.parallel_runner as module
     from types import SimpleNamespace
 
@@ -260,21 +260,17 @@ def test_worker_loop_flushes_result_queue_before_clean_exit(monkeypatch):
         def get(self):
             return next(self.items)
 
-    class ResultQueue:
+    class ResultConnection:
         def __init__(self):
             self.messages = []
             self.closed = False
-            self.joined = False
-        def put(self, message):
+        def send(self, message):
             self.messages.append(message)
         def close(self):
             self.closed = True
-        def join_thread(self):
-            assert self.closed
-            self.joined = True
 
     monkeypatch.setattr(module, "LucasEngineWorker", FakeEngine)
-    results = ResultQueue()
+    results = ResultConnection()
     module._worker_loop(
         0, "/bin/false", {
             "threads": 1, "hash_mb": 16, "multipv": 1, "depth": 19,
@@ -283,12 +279,11 @@ def test_worker_loop_flushes_result_queue_before_clean_exit(monkeypatch):
     )
     assert [item["type"] for item in results.messages] == ["job_result", "worker_finished"]
     assert results.closed is True
-    assert results.joined is True
 
 
-def test_clean_worker_exit_allows_late_finished_message(monkeypatch):
+def test_parent_receives_all_messages_from_closed_synchronous_pipe(monkeypatch):
     from chessgrandmaster.parallel_runner import ParallelLucasRunner
-    import queue
+    import multiprocessing as mp
 
     class CleanProcess:
         exitcode = 0
@@ -299,46 +294,32 @@ def test_clean_worker_exit_allows_late_finished_message(monkeypatch):
         def put_nowait(self, value):
             return None
 
-    class LateResultQueue:
-        def __init__(self):
-            self.nonblocking_calls = 0
-            self.blocking_calls = 0
-
-        def get_nowait(self):
-            self.nonblocking_calls += 1
-            if self.nonblocking_calls == 1:
-                return {
-                    "type": "job_result",
-                    "ok": True,
-                    "job_id": "j",
-                }
-            raise queue.Empty
-
-        def get(self, timeout=None):
-            self.blocking_calls += 1
-            if self.blocking_calls == 1:
-                raise queue.Empty
-            return {
-                "type": "worker_finished",
-                "worker_id": 0,
-                "engine_session_id": "session",
-                "archive_manifest": None,
-            }
+    receiver, sender = mp.Pipe(duplex=False)
+    sender.send({
+        "type": "job_result",
+        "ok": True,
+        "job_id": "j",
+    })
+    sender.send({
+        "type": "worker_finished",
+        "worker_id": 0,
+        "engine_session_id": "session",
+        "archive_manifest": None,
+    })
+    sender.close()
 
     runner = ParallelLucasRunner("/bin/false", workers=1, depth=19)
-    runner.result_queue = LateResultQueue()
 
     def fake_start():
         runner.processes = [CleanProcess()]
         runner.job_queues = [SinkQueue()]
+        runner.result_receivers = [receiver]
 
     monkeypatch.setattr(runner, "start", fake_start)
     jobs = [{"job_id": "j", "game_id": 1, "ply": 1}]
     results = list(runner.iter_analyze(jobs))
 
     assert [item["job_id"] for item in results] == ["j"]
-    assert runner.result_queue.blocking_calls == 2
-
 
 def test_dead_worker_error_reports_exit_codes(monkeypatch):
     from chessgrandmaster.parallel_runner import ParallelLucasRunner

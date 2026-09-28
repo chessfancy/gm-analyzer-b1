@@ -1,4 +1,5 @@
 import multiprocessing as mp
+from multiprocessing.connection import wait as wait_connections
 import queue
 import traceback
 from dataclasses import asdict
@@ -71,7 +72,7 @@ def _worker_loop(
     engine_path,
     config,
     job_queue,
-    result_queue,
+    result_conn,
     archive_root=None,
     run_id=None,
     execution_id=None,
@@ -150,7 +151,7 @@ def _worker_loop(
                 )
                 finished_at = datetime.now(timezone.utc).isoformat()
 
-                result_queue.put({
+                result_conn.send({
                     "type": "job_result",
                     "ok": True,
                     "execution_id": execution_id,
@@ -193,7 +194,7 @@ def _worker_loop(
 
                 finished_at = datetime.now(timezone.utc).isoformat()
 
-                result_queue.put({
+                result_conn.send({
                     "type": "job_result",
                     "ok": False,
                     "execution_id": execution_id,
@@ -258,9 +259,9 @@ def _worker_loop(
 
         try:
             if fatal is not None:
-                result_queue.put(fatal)
+                result_conn.send(fatal)
             elif initialized:
-                result_queue.put({
+                result_conn.send({
                     "type": "worker_finished",
                     "ok": True,
                     "execution_id": execution_id,
@@ -269,15 +270,10 @@ def _worker_loop(
                     "archive_manifest": manifest,
                 })
         finally:
-            # multiprocessing.Queue uses a background feeder thread in each
-            # producer process. Force that thread to flush every buffered
-            # job_result/finalization message before this worker exits.
-            close_queue = getattr(result_queue, "close", None)
-            if callable(close_queue):
-                close_queue()
-            join_queue = getattr(result_queue, "join_thread", None)
-            if callable(join_queue):
-                join_queue()
+            # A one-way Connection sends synchronously: when send() returns,
+            # the serialized message is already written to the pipe. Closing
+            # the worker endpoint cannot strand a feeder-thread buffer.
+            result_conn.close()
 
 
 class ParallelLucasRunner:
@@ -334,7 +330,7 @@ class ParallelLucasRunner:
         self.ctx = mp.get_context(method)
 
         self.job_queues = []
-        self.result_queue = self.ctx.Queue(maxsize=max(2, self.num_workers * 2))
+        self.result_receivers = []
         self.processes = []
         self.assignments = []
         self.archive_manifests = []
@@ -347,6 +343,7 @@ class ParallelLucasRunner:
 
         for worker_id in range(self.num_workers):
             job_queue = self.ctx.Queue(maxsize=2)
+            result_receiver, result_sender = self.ctx.Pipe(duplex=False)
             process = self.ctx.Process(
                 target=_worker_loop,
                 args=(
@@ -354,7 +351,7 @@ class ParallelLucasRunner:
                     self.engine_path,
                     self.config,
                     job_queue,
-                    self.result_queue,
+                    result_sender,
                     self.archive_root,
                     self.run_id,
                     self.execution_id,
@@ -363,7 +360,9 @@ class ParallelLucasRunner:
             )
 
             process.start()
+            result_sender.close()
             self.job_queues.append(job_queue)
+            self.result_receivers.append(result_receiver)
             self.processes.append(process)
 
     def iter_analyze(self, jobs):
@@ -373,20 +372,30 @@ class ParallelLucasRunner:
 
         self._dispatch_started = True
         jobs = list(jobs)
-        self.assignments = assign_games_to_workers(
-            jobs,
-            self.num_workers,
-        )
+        self.assignments = assign_games_to_workers(jobs, self.num_workers)
         self.start()
 
         received = 0
-        finished_workers = 0
+        finished_workers = set()
         pending = [None for _ in self.assignments]
         iterators = [iter(worker_jobs) for worker_jobs in self.assignments]
         sentinels = [False for _ in self.assignments]
+        open_receivers = {
+            worker_id: receiver
+            for worker_id, receiver in enumerate(self.result_receivers)
+        }
+        receiver_workers = {
+            receiver: worker_id for worker_id, receiver in open_receivers.items()
+        }
 
-        def handle_message(message):
-            nonlocal received, finished_workers
+        def close_receiver(worker_id):
+            receiver = open_receivers.pop(worker_id, None)
+            if receiver is not None:
+                receiver_workers.pop(receiver, None)
+                receiver.close()
+
+        def handle_message(message, source_worker):
+            nonlocal received
             message_type = message.get("type", "job_result")
             if message_type == "worker_fatal":
                 raise RuntimeError(
@@ -396,24 +405,41 @@ class ParallelLucasRunner:
                 )
 
             if message_type == "worker_finished":
-                finished_workers += 1
+                worker_id = message.get("worker_id", source_worker)
+                finished_workers.add(worker_id)
                 manifest = message.get("archive_manifest")
                 if manifest is not None:
                     self.archive_manifests.append({
                         "run_id": self.run_id,
                         "execution_id": self.execution_id,
-                        "worker_id": message.get("worker_id"),
-                        "engine_session_id": message.get(
-                            "engine_session_id"
-                        ),
+                        "worker_id": worker_id,
+                        "engine_session_id": message.get("engine_session_id"),
                         **manifest,
                     })
+                close_receiver(worker_id)
                 return None
 
             received += 1
             return message
 
-        while received < len(jobs) or finished_workers < self.num_workers:
+        def receive_ready(timeout):
+            if not open_receivers:
+                return []
+            ready = wait_connections(list(open_receivers.values()), timeout=timeout)
+            messages = []
+            for receiver in ready:
+                worker_id = receiver_workers.get(receiver)
+                if worker_id is None:
+                    continue
+                try:
+                    message = receiver.recv()
+                except EOFError:
+                    close_receiver(worker_id)
+                    continue
+                messages.append((worker_id, message))
+            return messages
+
+        while received < len(jobs) or len(finished_workers) < self.num_workers:
             made_progress = False
 
             for worker_id, job_iterator in enumerate(iterators):
@@ -438,12 +464,8 @@ class ParallelLucasRunner:
                     sentinels[worker_id] = True
                 pending[worker_id] = None
 
-            while True:
-                try:
-                    message = self.result_queue.get_nowait()
-                except queue.Empty:
-                    break
-                result = handle_message(message)
+            for worker_id, message in receive_ready(0):
+                result = handle_message(message, worker_id)
                 if result is not None:
                     yield result
 
@@ -451,46 +473,34 @@ class ParallelLucasRunner:
             if made_progress:
                 continue
 
-            try:
-                message = self.result_queue.get(timeout=1)
-            except queue.Empty:
-                if (
-                    self.processes
-                    and all(not process.is_alive() for process in self.processes)
-                ):
-                    exitcodes = ", ".join(
-                        f"worker={index} exitcode={process.exitcode}"
-                        for index, process in enumerate(self.processes)
+            messages = receive_ready(1)
+            if messages:
+                for worker_id, message in messages:
+                    result = handle_message(message, worker_id)
+                    if result is not None:
+                        yield result
+                continue
+
+            if self.processes and all(not process.is_alive() for process in self.processes):
+                exitcodes = ", ".join(
+                    f"worker={index} exitcode={process.exitcode}"
+                    for index, process in enumerate(self.processes)
+                )
+                abnormal = [
+                    process for process in self.processes
+                    if process.exitcode not in (0, None)
+                ]
+                if abnormal:
+                    raise RuntimeError(
+                        "Stockfish worker exited before reporting all results; "
+                        + exitcodes
                     )
-                    abnormal = [
-                        process
-                        for process in self.processes
-                        if process.exitcode not in (0, None)
-                    ]
-                    if abnormal:
-                        raise RuntimeError(
-                            "Stockfish worker exited before reporting all results; "
-                            + exitcodes
-                        )
-
-                    # multiprocessing.Queue uses a feeder thread. A child can
-                    # exit cleanly before its final worker_finished message is
-                    # observable by the parent. Give clean exits one bounded
-                    # grace read so the archive manifest can arrive instead of
-                    # misclassifying normal finalization as a worker crash.
-                    try:
-                        message = self.result_queue.get(timeout=5)
-                    except queue.Empty:
-                        raise RuntimeError(
-                            "Stockfish workers exited cleanly but final queue "
-                            "messages did not arrive; " + exitcodes
-                        )
-                else:
-                    continue
-
-            result = handle_message(message)
-            if result is not None:
-                yield result
+                raise RuntimeError(
+                    "Stockfish workers exited cleanly but synchronous result "
+                    f"pipes closed early: received={received}/{len(jobs)}, "
+                    f"finished={len(finished_workers)}/{self.num_workers}; "
+                    + exitcodes
+                )
 
         if received != len(jobs):
             raise RuntimeError(
@@ -521,8 +531,15 @@ class ParallelLucasRunner:
                 process.terminate()
                 process.join()
 
+        for receiver in self.result_receivers:
+            try:
+                receiver.close()
+            except OSError:
+                pass
+
         self.processes = []
         self.job_queues = []
+        self.result_receivers = []
 
     def __enter__(self):
         self.start()
