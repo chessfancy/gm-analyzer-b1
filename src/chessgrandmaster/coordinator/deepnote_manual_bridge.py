@@ -241,6 +241,31 @@ class DeepnoteManualBridge:
 
         raise ValueError("invalid Deepnote ready pointer schema")
 
+    def _ready_from_completed_current(
+        self,
+        state: dict[str, object],
+    ) -> dict[str, object] | None:
+        """Recover a completed project tree when Deepnote stopped before ready.json."""
+        current = state.get("current")
+        if not isinstance(current, dict):
+            return None
+        batch_id = str(current.get("batch_id") or "")
+        if not batch_id:
+            return None
+        result_root = f"cgm-manual/runtime/{batch_id}/result"
+        checksums_path = f"{result_root}/checksums.json"
+        checksums_bytes = self.storage.read_bytes(checksums_path)
+        if checksums_bytes is None:
+            return None
+        return {
+            "schema_version": "cgm-deepnote-ready-2",
+            "transport": "project-tree",
+            "batch_id": batch_id,
+            "result_root": result_root,
+            "checksums_path": checksums_path,
+            "checksums_sha256": _sha256_bytes(checksums_bytes),
+        }
+
     def _download_project_tree(
         self,
         *,
@@ -287,13 +312,16 @@ class DeepnoteManualBridge:
         return incoming, names
 
     def poll_once(self) -> ProcessedReadySummary | None:
+        state = self._load_state()
         ready_bytes = self.storage.read_bytes(READY_POINTER)
         if ready_bytes is None:
-            self.ensure_current_batch()
-            return None
-        ready = json.loads(ready_bytes.decode("utf-8"))
+            ready = self._ready_from_completed_current(state)
+            if ready is None:
+                self.ensure_current_batch()
+                return None
+        else:
+            ready = json.loads(ready_bytes.decode("utf-8"))
         transport, batch_id, result_location, expected_sha = self._validate_ready(ready)
-        state = self._load_state()
         last = str(state.get("last_processed_batch_id") or "")
         if batch_id == last:
             self.storage.delete(READY_POINTER)
