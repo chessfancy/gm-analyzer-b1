@@ -7,7 +7,6 @@ import argparse
 import importlib.util
 import json
 from pathlib import Path
-import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -17,7 +16,7 @@ from chessgrandmaster.coordinator.deepnote_manual_bridge import DeepnoteManualBr
 
 HOME = Path("/home/ubuntu")
 CGM = HOME / "data/cgm"
-REPO = HOME / "projects/gm-analyzer-b1"
+REPO = Path(__file__).resolve().parents[2]
 DB = Path("/home/ubuntu/data/cgm/coordinator.sqlite")
 ARCHIVE_ROOT = CGM / "archive"
 BRIDGE_ROOT = CGM / "deepnote-manual-bridge"
