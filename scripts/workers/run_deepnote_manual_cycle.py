@@ -22,8 +22,9 @@ def main(argv=None) -> int:
         "executed": summary.executed,
         "skipped": summary.skipped,
         "results": summary.results,
-        "archive": str(summary.archive),
-        "sha256": summary.sha256,
+        "transport": "project-tree",
+        "result_root": str(summary.result_root),
+        "checksums_sha256": summary.checksums_sha256,
         "ready": str(Path(args.work_root) / READY_POINTER),
     }, sort_keys=True))
     return 0
