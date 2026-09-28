@@ -6,13 +6,18 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import shutil
 from typing import Protocol
 import uuid
 import zipfile
 
-from .manual_batch import archive_directory, create_manual_batch, import_manual_result_archive
+from .manual_batch import (
+    archive_directory,
+    create_manual_batch,
+    import_manual_result_archive,
+    import_manual_result_directory,
+)
 from .queue import Coordinator
 
 CURRENT_ARCHIVE = "cgm-manual/inbox/current-batch.zip"
@@ -53,11 +58,24 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
 def _atomic_json(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     temp.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")), encoding="utf-8")
     temp.replace(path)
+
+
+def _safe_tree_name(name: object) -> str:
+    if not isinstance(name, str) or not name or "\\" in name:
+        raise ValueError(f"invalid Deepnote result path: {name!r}")
+    value = PurePosixPath(name)
+    if value.is_absolute() or any(part in ("", ".", "..") for part in value.parts):
+        raise ValueError(f"unsafe Deepnote result path: {name!r}")
+    return value.as_posix()
 
 
 class DeepnoteManualBridge:
@@ -191,17 +209,82 @@ class DeepnoteManualBridge:
         return self._upload_pending(state)
 
     @staticmethod
-    def _validate_ready(payload: dict[str, object]) -> tuple[str, str, str]:
-        if payload.get("schema_version") != "cgm-deepnote-ready-1":
-            raise ValueError("invalid Deepnote ready pointer schema")
+    def _validate_ready(payload: dict[str, object]) -> tuple[str, str, str, str]:
+        schema = payload.get("schema_version")
         batch_id = str(payload.get("batch_id") or "")
-        archive_path = str(payload.get("archive_path") or "")
-        sha = str(payload.get("sha256") or "").lower()
-        if not batch_id or not archive_path.startswith("cgm-manual/outbox/") or "/../" in archive_path:
-            raise ValueError("invalid Deepnote ready pointer identity")
-        if len(sha) != 64 or any(char not in "0123456789abcdef" for char in sha):
-            raise ValueError("invalid Deepnote result SHA256")
-        return batch_id, archive_path, sha
+        if not batch_id:
+            raise ValueError("Deepnote ready pointer has no batch_id")
+
+        if schema == "cgm-deepnote-ready-1":
+            archive_path = str(payload.get("archive_path") or "")
+            sha = str(payload.get("sha256") or "").lower()
+            if not archive_path.startswith("cgm-manual/outbox/") or "/../" in archive_path:
+                raise ValueError("invalid Deepnote ready pointer identity")
+            if len(sha) != 64 or any(char not in "0123456789abcdef" for char in sha):
+                raise ValueError("invalid Deepnote result SHA256")
+            return "archive", batch_id, archive_path, sha
+
+        if schema == "cgm-deepnote-ready-2":
+            if payload.get("transport") != "project-tree":
+                raise ValueError("invalid Deepnote result transport")
+            result_root = str(payload.get("result_root") or "")
+            expected_root = f"cgm-manual/runtime/{batch_id}/result"
+            if result_root != expected_root:
+                raise ValueError("invalid Deepnote project-tree result root")
+            checksums_path = str(payload.get("checksums_path") or "")
+            if checksums_path != f"{expected_root}/checksums.json":
+                raise ValueError("invalid Deepnote project-tree checksum path")
+            sha = str(payload.get("checksums_sha256") or "").lower()
+            if len(sha) != 64 or any(char not in "0123456789abcdef" for char in sha):
+                raise ValueError("invalid Deepnote project-tree checksum SHA256")
+            return "project-tree", batch_id, result_root, sha
+
+        raise ValueError("invalid Deepnote ready pointer schema")
+
+    def _download_project_tree(
+        self,
+        *,
+        batch_id: str,
+        remote_root: str,
+        expected_checksums_sha: str,
+    ) -> tuple[Path, tuple[str, ...]]:
+        checksums_remote = f"{remote_root}/checksums.json"
+        checksums_bytes = self.storage.read_bytes(checksums_remote)
+        if checksums_bytes is None:
+            raise ValueError("Deepnote project tree has no checksums.json")
+        actual_manifest_sha = _sha256_bytes(checksums_bytes)
+        if actual_manifest_sha != expected_checksums_sha:
+            raise ValueError(
+                "Deepnote project-tree checksum manifest mismatch: "
+                f"expected {expected_checksums_sha}, got {actual_manifest_sha}"
+            )
+        payload = json.loads(checksums_bytes.decode("utf-8"))
+        if payload.get("schema_version") != "cgm-checksums-1":
+            raise ValueError("Deepnote project tree has invalid checksum schema")
+        files = payload.get("files")
+        if not isinstance(files, dict) or not files:
+            raise ValueError("Deepnote project tree checksum file set is empty")
+        names = tuple(_safe_tree_name(name) for name in files)
+        if list(names) != sorted(names):
+            raise ValueError("Deepnote project tree checksum paths are not sorted")
+
+        incoming = self.root / "incoming" / batch_id
+        if incoming.exists():
+            shutil.rmtree(incoming)
+        incoming.mkdir(parents=True, exist_ok=True)
+        (incoming / "checksums.json").write_bytes(checksums_bytes)
+        for name in names:
+            digest = files[name]
+            if not isinstance(digest, str) or len(digest) != 64:
+                raise ValueError(f"invalid Deepnote checksum for {name}")
+            local = incoming / Path(*PurePosixPath(name).parts)
+            self.storage.download(f"{remote_root}/{name}", local)
+            actual = _sha256(local)
+            if actual != digest.lower():
+                raise ValueError(
+                    f"Deepnote project-tree file checksum mismatch for {name}"
+                )
+        return incoming, names
 
     def poll_once(self) -> ProcessedReadySummary | None:
         ready_bytes = self.storage.read_bytes(READY_POINTER)
@@ -209,36 +292,54 @@ class DeepnoteManualBridge:
             self.ensure_current_batch()
             return None
         ready = json.loads(ready_bytes.decode("utf-8"))
-        batch_id, archive_path, expected_sha = self._validate_ready(ready)
+        transport, batch_id, result_location, expected_sha = self._validate_ready(ready)
         state = self._load_state()
         last = str(state.get("last_processed_batch_id") or "")
         if batch_id == last:
             self.storage.delete(READY_POINTER)
-            self.storage.delete(archive_path)
+            if transport == "archive":
+                self.storage.delete(result_location)
             self.ensure_current_batch()
             return None
         current = state.get("current")
         if not isinstance(current, dict) or str(current.get("batch_id") or "") != batch_id:
             raise ValueError(f"unexpected Deepnote result batch: {batch_id}")
 
-        incoming = self.root / "incoming" / f"{batch_id}.zip"
-        self.storage.download(archive_path, incoming)
-        actual_sha = _sha256(incoming)
-        if actual_sha != expected_sha:
-            raise ValueError(f"Deepnote result SHA256 mismatch: expected {expected_sha}, got {actual_sha}")
-        with zipfile.ZipFile(incoming) as handle:
-            try:
-                result_meta = json.loads(handle.read("batch-result.json"))
-            except KeyError as exc:
-                raise ValueError("Deepnote result archive has no batch-result.json") from exc
-        if str(result_meta.get("batch_id") or "") != batch_id:
-            raise ValueError("Deepnote ready pointer batch_id does not match result archive")
+        remote_names: tuple[str, ...] = ()
+        if transport == "archive":
+            incoming = self.root / "incoming" / f"{batch_id}.zip"
+            self.storage.download(result_location, incoming)
+            actual_sha = _sha256(incoming)
+            if actual_sha != expected_sha:
+                raise ValueError(
+                    f"Deepnote result SHA256 mismatch: expected {expected_sha}, got {actual_sha}"
+                )
+            with zipfile.ZipFile(incoming) as handle:
+                try:
+                    result_meta = json.loads(handle.read("batch-result.json"))
+                except KeyError as exc:
+                    raise ValueError("Deepnote result archive has no batch-result.json") from exc
+            if str(result_meta.get("batch_id") or "") != batch_id:
+                raise ValueError("Deepnote ready pointer batch_id does not match result archive")
+            imported = import_manual_result_archive(
+                coordinator=self.coordinator,
+                archive_path=incoming,
+                extract_root=self.root / "imports",
+            )
+        else:
+            incoming, remote_names = self._download_project_tree(
+                batch_id=batch_id,
+                remote_root=result_location,
+                expected_checksums_sha=expected_sha,
+            )
+            result_meta = json.loads((incoming / "batch-result.json").read_text(encoding="utf-8"))
+            if str(result_meta.get("batch_id") or "") != batch_id:
+                raise ValueError("Deepnote ready pointer batch_id does not match result tree")
+            imported = import_manual_result_directory(
+                coordinator=self.coordinator,
+                result_root=incoming,
+            )
 
-        imported = import_manual_result_archive(
-            coordinator=self.coordinator,
-            archive_path=incoming,
-            extract_root=self.root / "imports",
-        )
         if imported.rejected:
             return ProcessedReadySummary(
                 batch_id=batch_id,
@@ -252,8 +353,13 @@ class DeepnoteManualBridge:
         state.pop("current", None)
         self._save_state(state)
         self.storage.delete(READY_POINTER)
-        self.storage.delete(archive_path)
-        self.storage.delete(archive_path + ".sha256")
+        if transport == "archive":
+            self.storage.delete(result_location)
+            self.storage.delete(result_location + ".sha256")
+        else:
+            for name in remote_names:
+                self.storage.delete(f"{result_location}/{name}")
+            self.storage.delete(f"{result_location}/checksums.json")
         next_batch = self.ensure_current_batch()
         return ProcessedReadySummary(
             batch_id=batch_id,
