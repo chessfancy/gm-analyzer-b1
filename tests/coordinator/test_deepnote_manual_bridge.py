@@ -9,6 +9,7 @@ from chessgrandmaster.coordinator import Coordinator, write_checksums
 from chessgrandmaster.coordinator.deepnote_manual_bridge import (
     CURRENT_ARCHIVE,
     CURRENT_POINTER,
+    batch_archive_path,
     READY_POINTER,
     DeepnoteManualBridge,
 )
@@ -172,7 +173,10 @@ def test_oracle_bridge_imports_project_tree_and_publishes_next_batch(tmp_path: P
     deepnote = tmp_path / "deepnote"
     inbox = deepnote / "cgm-manual/inbox"
     inbox.mkdir(parents=True)
-    (inbox / "current-batch.zip").write_bytes(storage.files[CURRENT_ARCHIVE])
+    pointer = json.loads(storage.files[CURRENT_POINTER])
+    remote_archive = pointer["archive_path"]
+    (deepnote / remote_archive).parent.mkdir(parents=True, exist_ok=True)
+    (deepnote / remote_archive).write_bytes(storage.files[remote_archive])
     (inbox / "current.json").write_bytes(storage.files[CURRENT_POINTER])
     run_deepnote_manual_cycle(work_root=deepnote, executor=fake_executor)
 
@@ -209,7 +213,10 @@ def test_oracle_bridge_recovers_completed_tree_without_ready_pointer(tmp_path: P
     deepnote = tmp_path / "deepnote"
     inbox = deepnote / "cgm-manual/inbox"
     inbox.mkdir(parents=True)
-    (inbox / "current-batch.zip").write_bytes(storage.files[CURRENT_ARCHIVE])
+    pointer = json.loads(storage.files[CURRENT_POINTER])
+    remote_archive = pointer["archive_path"]
+    (deepnote / remote_archive).parent.mkdir(parents=True, exist_ok=True)
+    (deepnote / remote_archive).write_bytes(storage.files[remote_archive])
     (inbox / "current.json").write_bytes(storage.files[CURRENT_POINTER])
     run_deepnote_manual_cycle(work_root=deepnote, executor=fake_executor)
     ready = json.loads((deepnote / READY_POINTER).read_text())
@@ -228,6 +235,94 @@ def test_oracle_bridge_recovers_completed_tree_without_ready_pointer(tmp_path: P
     assert current["batch_id"] != first.batch_id
     assert current["jobs"] == 1
 
+
+
+class FailCurrentPointerOnceStorage(MemoryStorage):
+    def __init__(self):
+        super().__init__()
+        self.fail_current_pointer_once = True
+
+    def upload(self, path: str, source: Path) -> None:
+        if path == CURRENT_POINTER and self.fail_current_pointer_once:
+            self.fail_current_pointer_once = False
+            raise RuntimeError("simulated current pointer publish failure")
+        super().upload(path, source)
+
+
+def test_batch_publish_uses_immutable_archive_and_pointer_last(tmp_path: Path):
+    coordinator = seed_coordinator(tmp_path, 1)
+    storage = MemoryStorage()
+    bridge = DeepnoteManualBridge(
+        coordinator=coordinator, storage=storage, root=tmp_path / "bridge",
+        max_jobs=1, min_priority=500,
+    )
+
+    current = bridge.ensure_current_batch()
+
+    assert current is not None
+    pointer = json.loads(storage.files[CURRENT_POINTER])
+    expected_archive = batch_archive_path(current.batch_id)
+    assert pointer["archive_path"] == expected_archive
+    assert expected_archive in storage.files
+    assert CURRENT_ARCHIVE not in storage.files
+    assert storage.upload_log[-1] == CURRENT_POINTER
+
+
+def test_pending_publish_retry_does_not_reupload_large_archive(tmp_path: Path):
+    coordinator = seed_coordinator(tmp_path, 1)
+    storage = FailCurrentPointerOnceStorage()
+    bridge = DeepnoteManualBridge(
+        coordinator=coordinator, storage=storage, root=tmp_path / "bridge",
+        max_jobs=1, min_priority=500,
+    )
+
+    import pytest
+    with pytest.raises(RuntimeError, match="pointer publish failure"):
+        bridge.ensure_current_batch()
+
+    state = json.loads((tmp_path / "bridge/state.json").read_text())
+    pending = state["pending_publish"]
+    remote_archive = pending["remote_archive"]
+    assert pending["archive_uploaded"] is True
+    assert storage.upload_log.count(remote_archive) == 1
+
+    current = bridge.ensure_current_batch()
+
+    assert current is not None
+    assert storage.upload_log.count(remote_archive) == 1
+    assert storage.upload_log[-1] == CURRENT_POINTER
+
+
+def test_legacy_pending_publish_state_migrates_to_immutable_archive(tmp_path: Path):
+    coordinator = seed_coordinator(tmp_path, 1)
+    storage = FailCurrentPointerOnceStorage()
+    bridge = DeepnoteManualBridge(
+        coordinator=coordinator, storage=storage, root=tmp_path / "bridge",
+        max_jobs=1, min_priority=500,
+    )
+    import pytest
+    with pytest.raises(RuntimeError):
+        bridge.ensure_current_batch()
+
+    state_path = tmp_path / "bridge/state.json"
+    state = json.loads(state_path.read_text())
+    pending = state["pending_publish"]
+    batch_id = pending["batch_id"]
+    # Recreate the shape written by the pre-immutable bridge.
+    for key in ("remote_archive", "remote_sha", "archive_uploaded", "sha_uploaded"):
+        pending.pop(key, None)
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    storage.files.clear()
+    storage.upload_log.clear()
+
+    current = bridge.ensure_current_batch()
+
+    assert current is not None
+    assert current.batch_id == batch_id
+    pointer = json.loads(storage.files[CURRENT_POINTER])
+    assert pointer["archive_path"] == batch_archive_path(batch_id)
+    assert batch_archive_path(batch_id) in storage.files
+    assert storage.upload_log[-1] == CURRENT_POINTER
 
 def test_deepnote_runtime_bootstraps_engine_when_missing(tmp_path, monkeypatch):
     import chessgrandmaster.coordinator.deepnote_manual_worker as worker

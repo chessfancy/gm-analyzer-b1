@@ -20,9 +20,10 @@ from .manual_batch import (
 )
 from .queue import Coordinator
 
-CURRENT_ARCHIVE = "cgm-manual/inbox/current-batch.zip"
-CURRENT_SHA = "cgm-manual/inbox/current-batch.zip.sha256"
+CURRENT_ARCHIVE = "cgm-manual/inbox/current-batch.zip"  # legacy
+CURRENT_SHA = "cgm-manual/inbox/current-batch.zip.sha256"  # legacy
 CURRENT_POINTER = "cgm-manual/inbox/current.json"
+BATCH_INBOX = "cgm-manual/inbox/batches"
 READY_POINTER = "cgm-manual/outbox/ready.json"
 
 
@@ -78,6 +79,17 @@ def _safe_tree_name(name: object) -> str:
     return value.as_posix()
 
 
+def batch_archive_path(batch_id: str) -> str:
+    value = str(batch_id)
+    if not value or "/" in value or "\\" in value or value in {".", ".."}:
+        raise ValueError(f"invalid Deepnote batch_id: {batch_id!r}")
+    return f"{BATCH_INBOX}/{value}.zip"
+
+
+def batch_sha_path(batch_id: str) -> str:
+    return batch_archive_path(batch_id) + ".sha256"
+
+
 class DeepnoteManualBridge:
     def __init__(
         self,
@@ -121,20 +133,54 @@ class DeepnoteManualBridge:
 
     def _upload_pending(self, state: dict[str, object]) -> CurrentBatchSummary:
         pending = dict(state["pending_publish"])
+        batch_id = str(pending["batch_id"])
         archive = Path(str(pending["archive"]))
         pointer_file = Path(str(pending["pointer_file"]))
         sha_file = Path(str(pending["sha_file"]))
+        remote_archive = str(pending.get("remote_archive") or batch_archive_path(batch_id))
+        remote_sha = str(pending.get("remote_sha") or batch_sha_path(batch_id))
+
+        # Rebuild the pointer so legacy pending_publish state migrates safely to
+        # immutable, batch-specific archive paths. The small pointer is always
+        # published last and is the only mutable inbox object.
+        pointer = {
+            "schema_version": "cgm-deepnote-current-1",
+            "batch_id": batch_id,
+            "archive_path": remote_archive,
+            "sha256": pending["sha256"],
+            "jobs": pending["jobs"],
+            "games": pending["games"],
+            "plies": pending["plies"],
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _atomic_json(pointer_file, pointer)
+        pending["remote_archive"] = remote_archive
+        pending["remote_sha"] = remote_sha
+
+        # Persist each large-upload milestone before moving on. If publishing
+        # current.json fails, the next cron run skips the already-uploaded ZIP.
+        if not pending.get("archive_uploaded"):
+            self.storage.upload(remote_archive, archive)
+            pending["archive_uploaded"] = True
+            state["pending_publish"] = pending
+            self._save_state(state)
+        if not pending.get("sha_uploaded"):
+            self.storage.upload(remote_sha, sha_file)
+            pending["sha_uploaded"] = True
+            state["pending_publish"] = pending
+            self._save_state(state)
+
         self.storage.delete(CURRENT_POINTER)
-        self.storage.upload(CURRENT_ARCHIVE, archive)
-        self.storage.upload(CURRENT_SHA, sha_file)
         self.storage.upload(CURRENT_POINTER, pointer_file)
         current = {
-            "batch_id": pending["batch_id"],
+            "batch_id": batch_id,
             "jobs": pending["jobs"],
             "games": pending["games"],
             "plies": pending["plies"],
             "sha256": pending["sha256"],
             "archive": str(archive),
+            "remote_archive": remote_archive,
+            "remote_sha": remote_sha,
             "pointer_file": str(pointer_file),
             "sha_file": str(sha_file),
         }
@@ -142,7 +188,7 @@ class DeepnoteManualBridge:
         state.pop("pending_publish", None)
         self._save_state(state)
         return CurrentBatchSummary(
-            batch_id=str(current["batch_id"]),
+            batch_id=batch_id,
             jobs=int(current["jobs"]),
             games=int(current["games"]),
             plies=int(current["plies"]),
@@ -183,10 +229,12 @@ class DeepnoteManualBridge:
         sha = _sha256(archive)
         sha_file = archive.with_suffix(".zip.sha256")
         sha_file.write_text(f"{sha}  {archive.name}\n", encoding="utf-8")
+        remote_archive = batch_archive_path(summary.batch_id)
+        remote_sha = batch_sha_path(summary.batch_id)
         pointer = {
             "schema_version": "cgm-deepnote-current-1",
             "batch_id": summary.batch_id,
-            "archive_path": CURRENT_ARCHIVE,
+            "archive_path": remote_archive,
             "sha256": sha,
             "jobs": summary.jobs,
             "games": games,
@@ -204,6 +252,10 @@ class DeepnoteManualBridge:
             "archive": str(archive),
             "sha_file": str(sha_file),
             "pointer_file": str(pointer_file),
+            "remote_archive": remote_archive,
+            "remote_sha": remote_sha,
+            "archive_uploaded": False,
+            "sha_uploaded": False,
         }
         self._save_state(state)
         return self._upload_pending(state)

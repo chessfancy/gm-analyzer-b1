@@ -7,6 +7,7 @@ import argparse
 import importlib.util
 import json
 from pathlib import Path
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -58,10 +59,22 @@ class DeepnoteProjectStorage:
         dn._download_file(self.project_id, path, destination)
 
     def upload(self, path: str, source: Path) -> None:
-        dn._delete_file(self.project_id, path)
-        uploaded = dn._upload_file(self.project_id, path, source)
-        if uploaded != path:
-            raise RuntimeError(f"Deepnote uploaded unexpected path: {uploaded!r}")
+        last_uploaded = None
+        for attempt in range(4):
+            dn._delete_file(self.project_id, path)
+            if attempt:
+                time.sleep(float(attempt))
+            uploaded = dn._upload_file(self.project_id, path, source)
+            if uploaded == path:
+                return
+            last_uploaded = uploaded
+            # Deepnote can auto-rename when deletion has not propagated yet.
+            # Remove the collision artifact and retry the requested identity.
+            dn._delete_file(self.project_id, uploaded)
+            time.sleep(float(attempt + 1))
+        raise RuntimeError(
+            f"Deepnote uploaded unexpected path after retries: {last_uploaded!r}"
+        )
 
     def delete(self, path: str) -> None:
         dn._delete_file(self.project_id, path)

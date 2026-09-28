@@ -8,7 +8,7 @@ import hashlib
 import importlib.util
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import shutil
 import subprocess
 import sys
@@ -16,7 +16,9 @@ import sys
 from chessgrandmaster.engine_manifest import resolve_installed_engine
 
 from .manual_batch import safe_extract_zip
-from .deepnote_manual_bridge import CURRENT_ARCHIVE, CURRENT_POINTER, READY_POINTER
+from .deepnote_manual_bridge import (
+    CURRENT_ARCHIVE, CURRENT_POINTER, READY_POINTER, batch_archive_path,
+)
 
 
 @dataclass(frozen=True)
@@ -42,6 +44,19 @@ def _atomic_json(path: Path, payload: dict[str, object]) -> None:
     temp = path.with_name(f".{path.name}.tmp")
     temp.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")), encoding="utf-8")
     temp.replace(path)
+
+
+def _validated_archive_path(batch_id: str, value: object) -> str:
+    archive_rel = str(value or CURRENT_ARCHIVE)
+    if "\\" in archive_rel:
+        raise ValueError(f"unexpected Deepnote batch archive path: {archive_rel}")
+    path = PurePosixPath(archive_rel)
+    if path.is_absolute() or any(part in ("", ".", "..") for part in path.parts):
+        raise ValueError(f"unexpected Deepnote batch archive path: {archive_rel}")
+    expected = batch_archive_path(batch_id)
+    if archive_rel not in {CURRENT_ARCHIVE, expected}:
+        raise ValueError(f"unexpected Deepnote batch archive path: {archive_rel}")
+    return archive_rel
 
 
 def ensure_deepnote_runtime_ready(*, repo_root: str | Path | None = None) -> Path:
@@ -100,9 +115,7 @@ def run_deepnote_manual_cycle(
     batch_id = str(current.get("batch_id") or "")
     if not batch_id:
         raise ValueError("Deepnote current batch pointer has no batch_id")
-    archive_rel = str(current.get("archive_path") or CURRENT_ARCHIVE)
-    if archive_rel != CURRENT_ARCHIVE:
-        raise ValueError(f"unexpected Deepnote batch archive path: {archive_rel}")
+    archive_rel = _validated_archive_path(batch_id, current.get("archive_path"))
     batch_archive = work_root / archive_rel
     expected_sha = str(current.get("sha256") or "").lower()
     actual_sha = _sha256(batch_archive)
