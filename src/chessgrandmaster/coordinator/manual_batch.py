@@ -154,28 +154,24 @@ def safe_extract_zip(archive_path: str | Path, destination: str | Path) -> Path:
     return destination
 
 
-def import_manual_result_archive(
+def import_manual_result_directory(
     *,
     coordinator: Coordinator,
-    archive_path: str | Path,
-    extract_root: str | Path,
+    result_root: str | Path,
 ) -> ManualImportSummary:
-    archive_path = Path(archive_path).resolve()
-    extract_root = Path(extract_root).resolve()
-    extract_root.mkdir(parents=True, exist_ok=True)
-    extracted = Path(tempfile.mkdtemp(prefix=f"{archive_path.stem}-", dir=extract_root))
-    safe_extract_zip(archive_path, extracted)
-    _verify_tree_checksums(extracted)
-    result_manifest = extracted / "batch-result.json"
+    """Verify and import an already-materialized manual result tree."""
+    result_root = Path(result_root).resolve()
+    _verify_tree_checksums(result_root)
+    result_manifest = result_root / "batch-result.json"
     if not result_manifest.is_file():
-        raise ValueError("manual result archive has no batch-result.json")
+        raise ValueError("manual result tree has no batch-result.json")
     payload = json.loads(result_manifest.read_text(encoding="utf-8"))
     if payload.get("schema_version") != "cgm-manual-result-batch-1":
-        raise ValueError("manual result archive has invalid schema")
+        raise ValueError("manual result tree has invalid schema")
 
     completed: list[str] = []
     rejected: list[str] = []
-    results_root = extracted / "results"
+    results_root = result_root / "results"
     for result in sorted(path for path in results_root.iterdir() if path.is_dir()):
         try:
             receipt = coordinator.import_result(result)
@@ -194,5 +190,22 @@ def import_manual_result_archive(
         rejected=len(rejected),
         job_ids=tuple(completed),
         rejected_jobs=tuple(rejected),
-        extracted_path=extracted,
+        extracted_path=result_root,
+    )
+
+
+def import_manual_result_archive(
+    *,
+    coordinator: Coordinator,
+    archive_path: str | Path,
+    extract_root: str | Path,
+) -> ManualImportSummary:
+    archive_path = Path(archive_path).resolve()
+    extract_root = Path(extract_root).resolve()
+    extract_root.mkdir(parents=True, exist_ok=True)
+    extracted = Path(tempfile.mkdtemp(prefix=f"{archive_path.stem}-", dir=extract_root))
+    safe_extract_zip(archive_path, extracted)
+    return import_manual_result_directory(
+        coordinator=coordinator,
+        result_root=extracted,
     )
