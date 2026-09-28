@@ -15,8 +15,9 @@ import sys
 
 from chessgrandmaster.engine_manifest import resolve_installed_engine
 
-from .manual_batch import archive_directory, safe_extract_zip
+from .manual_batch import safe_extract_zip
 from .deepnote_manual_bridge import CURRENT_ARCHIVE, CURRENT_POINTER, READY_POINTER
+
 
 @dataclass(frozen=True)
 class DeepnoteCycleSummary:
@@ -24,8 +25,8 @@ class DeepnoteCycleSummary:
     executed: int
     skipped: int
     results: int
-    archive: Path
-    sha256: str
+    result_root: Path
+    checksums_sha256: str
 
 
 def _sha256(path: Path) -> str:
@@ -121,19 +122,22 @@ def run_deepnote_manual_cycle(
     if executor is None:
         ensure_deepnote_runtime_ready()
     summary = _load_manual_runner()(batch_dir, result_dir, executor=executor)
-    outbox = work_root / "cgm-manual/outbox"
-    outbox.mkdir(parents=True, exist_ok=True)
-    result_archive = archive_directory(result_dir, outbox / f"{batch_id}.zip")
-    result_sha = _sha256(result_archive)
-    result_archive.with_suffix(".zip.sha256").write_text(
-        f"{result_sha}  {result_archive.name}\n", encoding="utf-8"
-    )
+
+    # Result files already live in persistent Deepnote project storage. Do not
+    # recompress SQLite + already-gzipped raw-UCI into one giant ZIP. Publish a
+    # tiny pointer last; Oracle reconstructs and verifies the tree file-by-file.
+    checksums_path = result_dir / "checksums.json"
+    if not checksums_path.is_file():
+        raise RuntimeError(f"manual result tree has no checksums.json: {result_dir}")
+    checksums_sha = _sha256(checksums_path)
+    result_root_rel = result_dir.relative_to(work_root).as_posix()
     ready = {
-        "schema_version": "cgm-deepnote-ready-1",
+        "schema_version": "cgm-deepnote-ready-2",
+        "transport": "project-tree",
         "batch_id": batch_id,
-        "archive_path": f"cgm-manual/outbox/{result_archive.name}",
-        "sha256": result_sha,
-        "bytes": result_archive.stat().st_size,
+        "result_root": result_root_rel,
+        "checksums_path": f"{result_root_rel}/checksums.json",
+        "checksums_sha256": checksums_sha,
         "results": summary.results,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -143,7 +147,6 @@ def run_deepnote_manual_cycle(
         executed=summary.executed,
         skipped=summary.skipped,
         results=summary.results,
-        archive=result_archive,
-        sha256=result_sha,
+        result_root=result_dir,
+        checksums_sha256=checksums_sha,
     )
-
