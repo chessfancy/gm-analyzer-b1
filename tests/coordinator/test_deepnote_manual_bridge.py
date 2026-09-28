@@ -193,6 +193,42 @@ def test_oracle_bridge_imports_project_tree_and_publishes_next_batch(tmp_path: P
     assert not any(path.startswith(ready["result_root"] + "/") for path in storage.files)
 
 
+def test_oracle_bridge_recovers_completed_tree_without_ready_pointer(tmp_path: Path):
+    coordinator = seed_coordinator(tmp_path, 3)
+    storage = MemoryStorage()
+    bridge = DeepnoteManualBridge(
+        coordinator=coordinator,
+        storage=storage,
+        root=tmp_path / "bridge",
+        max_jobs=2,
+        min_priority=500,
+    )
+    first = bridge.ensure_current_batch()
+    assert first is not None
+
+    deepnote = tmp_path / "deepnote"
+    inbox = deepnote / "cgm-manual/inbox"
+    inbox.mkdir(parents=True)
+    (inbox / "current-batch.zip").write_bytes(storage.files[CURRENT_ARCHIVE])
+    (inbox / "current.json").write_bytes(storage.files[CURRENT_POINTER])
+    run_deepnote_manual_cycle(work_root=deepnote, executor=fake_executor)
+    ready = json.loads((deepnote / READY_POINTER).read_text())
+    _publish_local_tree(storage, deepnote, ready)
+    storage.files.pop(READY_POINTER, None)
+
+    processed = bridge.poll_once()
+
+    assert processed is not None
+    assert processed.batch_id == first.batch_id
+    assert processed.completed == 2
+    assert processed.rejected == 0
+    assert coordinator.get_job("job-0").state.value == "COMPLETED"
+    assert coordinator.get_job("job-1").state.value == "COMPLETED"
+    current = json.loads(storage.files[CURRENT_POINTER])
+    assert current["batch_id"] != first.batch_id
+    assert current["jobs"] == 1
+
+
 def test_deepnote_runtime_bootstraps_engine_when_missing(tmp_path, monkeypatch):
     import chessgrandmaster.coordinator.deepnote_manual_worker as worker
 
