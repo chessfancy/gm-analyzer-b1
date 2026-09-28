@@ -12,7 +12,7 @@ from chessgrandmaster.coordinator.deepnote_manual_bridge import (
     READY_POINTER,
     DeepnoteManualBridge,
 )
-from chessgrandmaster.coordinator.manual_batch import create_manual_batch, safe_extract_zip
+from chessgrandmaster.coordinator.manual_batch import create_manual_batch
 from chessgrandmaster.coordinator.deepnote_manual_worker import run_deepnote_manual_cycle
 
 
@@ -104,7 +104,16 @@ def seed_coordinator(tmp_path: Path, jobs: int) -> Coordinator:
     return coordinator
 
 
-def test_worker_cycle_writes_result_archive_then_ready_pointer(tmp_path: Path):
+def _publish_local_tree(storage: MemoryStorage, work: Path, ready: dict) -> None:
+    local_root = work / ready["result_root"]
+    remote_root = str(ready["result_root"])
+    for path in sorted(item for item in local_root.rglob("*") if item.is_file()):
+        relative = path.relative_to(local_root).as_posix()
+        storage.files[f"{remote_root}/{relative}"] = path.read_bytes()
+    storage.files[READY_POINTER] = (work / READY_POINTER).read_bytes()
+
+
+def test_worker_cycle_publishes_project_tree_pointer_without_result_zip(tmp_path: Path):
     coordinator = seed_coordinator(tmp_path, 1)
     batch = create_manual_batch(
         coordinator=coordinator,
@@ -131,14 +140,20 @@ def test_worker_cycle_writes_result_archive_then_ready_pointer(tmp_path: Path):
     summary = run_deepnote_manual_cycle(work_root=work, executor=fake_executor)
 
     ready = json.loads((work / READY_POINTER).read_text())
-    archive = work / ready["archive_path"]
+    result_root = work / ready["result_root"]
+    checksums = result_root / "checksums.json"
     assert summary.batch_id == batch.batch_id
+    assert ready["schema_version"] == "cgm-deepnote-ready-2"
+    assert ready["transport"] == "project-tree"
     assert ready["batch_id"] == batch.batch_id
-    assert ready["sha256"] == hashlib.sha256(archive.read_bytes()).hexdigest()
-    assert ready["archive_path"].startswith("cgm-manual/outbox/")
+    assert ready["result_root"] == f"cgm-manual/runtime/{batch.batch_id}/result"
+    assert ready["checksums_path"] == f"{ready['result_root']}/checksums.json"
+    assert ready["checksums_sha256"] == hashlib.sha256(checksums.read_bytes()).hexdigest()
+    assert summary.result_root == result_root
+    assert not list((work / "cgm-manual/outbox").glob("*.zip")) if (work / "cgm-manual/outbox").exists() else True
 
 
-def test_oracle_bridge_imports_ready_result_and_publishes_next_batch(tmp_path: Path):
+def test_oracle_bridge_imports_project_tree_and_publishes_next_batch(tmp_path: Path):
     coordinator = seed_coordinator(tmp_path, 3)
     storage = MemoryStorage()
     bridge = DeepnoteManualBridge(
@@ -162,9 +177,7 @@ def test_oracle_bridge_imports_ready_result_and_publishes_next_batch(tmp_path: P
     run_deepnote_manual_cycle(work_root=deepnote, executor=fake_executor)
 
     ready = json.loads((deepnote / READY_POINTER).read_text())
-    result_remote = ready["archive_path"]
-    storage.files[result_remote] = (deepnote / result_remote).read_bytes()
-    storage.files[READY_POINTER] = (deepnote / READY_POINTER).read_bytes()
+    _publish_local_tree(storage, deepnote, ready)
 
     processed = bridge.poll_once()
 
@@ -177,6 +190,7 @@ def test_oracle_bridge_imports_ready_result_and_publishes_next_batch(tmp_path: P
     assert current["batch_id"] != first.batch_id
     assert current["jobs"] == 1
     assert READY_POINTER not in storage.files
+    assert not any(path.startswith(ready["result_root"] + "/") for path in storage.files)
 
 
 def test_deepnote_runtime_bootstraps_engine_when_missing(tmp_path, monkeypatch):
