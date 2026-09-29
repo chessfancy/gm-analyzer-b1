@@ -42,9 +42,11 @@ def _(mo):
            package, install and verify the pinned Stockfish 19 binary.
         2. Optionally click **Export platform JSON** and upload
            `cgm_molab_data/molab_platform.json` for worker selection.
-        3. Prefer **Download Oracle workload** to fetch and SHA-256 verify the
-           current Molab assignment directly from Oracle. Manual upload still works.
-        4. Click **Analyze PGN**. Molab uses the provider policy of
+        3. For coordinator work, use **Run next Oracle S3 batch**: one click
+           downloads the current immutable batch, resumes completed shards from S3,
+           runs B1, uploads each validated shard plus heartbeat, and publishes ready.
+           The older manual download/upload controls remain as a fallback.
+        4. For ad-hoc PGNs, click **Analyze PGN**. Molab uses the provider policy of
            **4 workers**, Threads/worker=1, Hash/worker=1536 MB, depth=19,
            no time limit, and snapshots at depths 12, 14, 16, 18 and 19.
            Results are written under `cgm_molab_data/db` and
@@ -126,6 +128,7 @@ def _(
     _env = os.environ.copy()
     _env["CGM_VENV"] = str(venv_dir)
     _env["CGM_HOME"] = str(data_root)
+    _env["CGM_INSTALL_S3"] = "1"
 
     subprocess.run(
         ["bash", "scripts/setup_platform.sh"],
@@ -590,6 +593,65 @@ def _(
         """
     )
     return (analysis_result,)
+
+
+@app.cell
+def _(mo):
+    s3_coordinator_button = mo.ui.run_button(
+        label="Run next Oracle S3 batch",
+        kind="success",
+    )
+    mo.vstack([
+        mo.md(
+            """## Oracle coordinator — S3 one-click worker
+
+Requires Molab secrets `CGM_MOLAB_S3_ACCESS_KEY` and
+`CGM_MOLAB_S3_SECRET_KEY`. The endpoint/bucket defaults can also be supplied
+as secrets/environment variables. Completed shards are uploaded to S3 as they
+finish, so a later session can resume them."""
+        ),
+        s3_coordinator_button,
+    ])
+    return (s3_coordinator_button,)
+
+
+@app.cell
+def _(data_root, mo, os, repo_dir, s3_coordinator_button, setup_status, subprocess, venv_dir):
+    mo.stop(
+        not s3_coordinator_button.value,
+        mo.md("Click **Run next Oracle S3 batch** after setup."),
+    )
+    _env = os.environ.copy()
+    _env.setdefault("CGM_MOLAB_S3_ENDPOINT", "https://node02.s3interdata.com:9000")
+    _env.setdefault("CGM_MOLAB_S3_BUCKET", "s3-637-35690-storage")
+    _env.setdefault("CGM_MOLAB_S3_PREFIX", "gm-analyzer/molab")
+    _missing = [
+        name for name in ("CGM_MOLAB_S3_ACCESS_KEY", "CGM_MOLAB_S3_SECRET_KEY")
+        if not _env.get(name)
+    ]
+    if _missing:
+        raise RuntimeError(
+            "Missing Molab secret(s): " + ", ".join(_missing)
+            + ". Add them to Molab Secrets, then run again."
+        )
+    _env["CGM_VENV"] = str(venv_dir)
+    _env["CGM_HOME"] = str(data_root)
+    _env["CGM_STOCKFISH"] = setup_status["engine"]
+    _runner = repo_dir / "scripts" / "workers" / "run_molab_s3_cycle.py"
+    _work_root = data_root / "s3-worker"
+    subprocess.run(
+        [str(venv_dir / "bin" / "python"), str(_runner), "--work-root", str(_work_root)],
+        cwd=repo_dir,
+        env=_env,
+        check=True,
+    )
+    mo.md(
+        """## Oracle S3 batch complete
+
+Result shards and `ready.json` are already in S3. Oracle will checksum-verify
+and import them automatically; no manual download is required."""
+    )
+    return
 
 
 if __name__ == "__main__":

@@ -40,8 +40,12 @@ print("python-chess:", chess.__version__)
 PY_RUNTIME
 else
     PACKAGE_SPEC="$ROOT"
-    if [[ "${CGM_INSTALL_DEV:-1}" != "0" ]]; then
-        PACKAGE_SPEC="${ROOT}[dev]"
+    EXTRAS=()
+    if [[ "${CGM_INSTALL_DEV:-1}" != "0" ]]; then EXTRAS+=(dev); fi
+    if [[ "${CGM_INSTALL_S3:-0}" == "1" ]]; then EXTRAS+=(s3); fi
+    if [[ "${#EXTRAS[@]}" -gt 0 ]]; then
+        EXTRA_CSV="$(IFS=,; echo "${EXTRAS[*]}")"
+        PACKAGE_SPEC="${ROOT}[${EXTRA_CSV}]"
     fi
     "$PYTHON_BIN" -m pip install -e "$PACKAGE_SPEC"
 fi

@@ -51,3 +51,16 @@ def test_manual_worker_can_load_job_executor_from_subprocess_environment():
     proc = subprocess.run([sys.executable, "-c", code], cwd=ROOT, env=env, text=True, capture_output=True)
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() == "execute_job"
+
+
+def test_oracle_has_molab_s3_bridge_runner_and_secret_setup():
+    bridge = ROOT / "scripts" / "oracle" / "run_molab_s3_bridge.py"
+    wrapper = ROOT / "scripts" / "oracle" / "run_molab_s3_bridge.sh"
+    secrets = ROOT / "scripts" / "oracle" / "setup_molab_s3_secrets.sh"
+    worker = ROOT / "scripts" / "workers" / "run_molab_s3_cycle.py"
+    probe = ROOT / "scripts" / "oracle" / "probe_molab_s3.py"
+    for path in (bridge, wrapper, secrets, worker, probe):
+        assert path.is_file(), path
+    assert "CGM_MOLAB_S3_ENDPOINT" in bridge.read_text(encoding="utf-8")
+    assert "molab_s3.env" in wrapper.read_text(encoding="utf-8")
+    assert "read -rs" in secrets.read_text(encoding="utf-8")

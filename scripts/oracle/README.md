@@ -170,3 +170,24 @@ files are available for a separately verified conversion.
 ## Deepnote manual bridge
 
 `run_deepnote_manual_bridge.sh` polls Deepnote project storage for `cgm-manual/outbox/ready.json`. A verified result is imported through the coordinator before the bridge publishes the next manual batch to `cgm-manual/inbox/current-batch.zip`. The Deepnote notebook holds no Oracle credential; Oracle uses its existing Deepnote API secret for both directions. See `docs/deepnote-manual-bridge.md`.
+
+## Molab S3 bridge
+
+Molab can use the coordinator-native S3 mailbox instead of manually downloading
+and returning result archives. Oracle keeps its S3 credential in
+`~/.config/cgm/secrets/molab_s3.env` (mode 0600). Molab should use a separate
+restricted access key exposed through Molab Secrets with the same endpoint,
+bucket and prefix.
+
+```bash
+./scripts/oracle/setup_molab_s3_secrets.sh
+source ~/.config/cgm/secrets/molab_s3.env
+PYTHONPATH=src .venv/bin/python scripts/oracle/probe_molab_s3.py
+```
+
+The mailbox prefix defaults to `gm-analyzer/molab`. Oracle publishes immutable
+input batches under `inbox/batches/` and the mutable `inbox/current.json` last.
+Molab uploads every validated result shard immediately under
+`runtime/<batch_id>/result/`, updates `progress.json`, then writes
+`outbox/ready.json` last. `run_molab_s3_bridge.sh` verifies/imports the result
+tree and publishes the next coordinator batch.

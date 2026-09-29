@@ -398,3 +398,188 @@ def test_deepnote_runtime_bootstraps_engine_when_missing(tmp_path, monkeypatch):
     assert env["CGM_BOOTSTRAP_PYTHON"] == str(python)
     assert env["CGM_INSTALL_DEV"] == "0"
     assert check is True
+
+
+def test_molab_s3_bridge_publishes_coordinator_batch(tmp_path: Path):
+    from chessgrandmaster.coordinator.molab_s3_bridge import MolabS3Bridge, CURRENT_POINTER as MOLAB_CURRENT
+
+    coordinator = seed_coordinator(tmp_path, 2)
+    storage = MemoryStorage()
+    bridge = MolabS3Bridge(
+        coordinator=coordinator, storage=storage, root=tmp_path / "molab-bridge",
+        max_jobs=2, min_priority=500,
+    )
+
+    current = bridge.ensure_current_batch()
+
+    assert current is not None
+    assert current.jobs == 2
+    pointer = json.loads(storage.files[MOLAB_CURRENT])
+    assert pointer["schema_version"] == "cgm-molab-s3-current-1"
+    assert pointer["batch_id"] == current.batch_id
+    assert pointer["archive_path"] == f"inbox/batches/{current.batch_id}.zip"
+    assert hashlib.sha256(storage.files[pointer["archive_path"]]).hexdigest() == pointer["sha256"]
+
+
+def test_molab_s3_worker_uploads_durable_shards_progress_and_ready(tmp_path: Path):
+    from chessgrandmaster.coordinator.molab_s3_bridge import MolabS3Bridge, READY_POINTER as MOLAB_READY
+    from chessgrandmaster.coordinator.molab_s3_worker import run_molab_s3_cycle
+
+    coordinator = seed_coordinator(tmp_path, 2)
+    storage = MemoryStorage()
+    bridge = MolabS3Bridge(
+        coordinator=coordinator, storage=storage, root=tmp_path / "molab-bridge",
+        max_jobs=2, min_priority=500,
+    )
+    current = bridge.ensure_current_batch()
+    assert current is not None
+
+    summary = run_molab_s3_cycle(storage=storage, work_root=tmp_path / "molab-work", executor=fake_executor)
+
+    progress = json.loads(storage.files[f"runtime/{current.batch_id}/progress.json"])
+    ready = json.loads(storage.files[MOLAB_READY])
+    assert progress["state"] == "complete"
+    assert progress["jobs_completed"] == 2
+    assert summary.executed == 2
+    assert ready["schema_version"] == "cgm-molab-s3-ready-1"
+    assert ready["transport"] == "project-tree"
+    assert ready["result_root"] == f"runtime/{current.batch_id}/result"
+    assert f"runtime/{current.batch_id}/result/results/0000/job-result.json" in storage.files
+    assert f"runtime/{current.batch_id}/result/results/0001/job-result.json" in storage.files
+
+
+def test_molab_s3_bridge_imports_result_tree_and_publishes_next(tmp_path: Path):
+    from chessgrandmaster.coordinator.molab_s3_bridge import MolabS3Bridge
+    from chessgrandmaster.coordinator.molab_s3_worker import run_molab_s3_cycle
+
+    coordinator = seed_coordinator(tmp_path, 3)
+    storage = MemoryStorage()
+    bridge = MolabS3Bridge(
+        coordinator=coordinator, storage=storage, root=tmp_path / "molab-bridge",
+        max_jobs=2, min_priority=500,
+    )
+    first = bridge.ensure_current_batch()
+    assert first is not None
+    run_molab_s3_cycle(storage=storage, work_root=tmp_path / "molab-work", executor=fake_executor)
+
+    processed = bridge.poll_once()
+
+    assert processed is not None
+    assert processed.batch_id == first.batch_id
+    assert processed.completed == 2
+    assert processed.rejected == 0
+    assert processed.next_batch_id is not None
+    assert len(coordinator.list_jobs("COMPLETED")) == 2
+
+
+def test_molab_s3_publish_retry_does_not_lease_a_second_batch(tmp_path: Path):
+    from chessgrandmaster.coordinator.molab_s3_bridge import MolabS3Bridge, CURRENT_POINTER as MOLAB_CURRENT
+
+    class FailPointerOnce(MemoryStorage):
+        def __init__(self):
+            super().__init__(); self.failed = False
+        def upload(self, path: str, source: Path) -> None:
+            if path == MOLAB_CURRENT and not self.failed:
+                self.failed = True
+                raise RuntimeError("temporary S3 pointer failure")
+            super().upload(path, source)
+
+    coordinator = seed_coordinator(tmp_path, 4)
+    storage = FailPointerOnce()
+    bridge = MolabS3Bridge(
+        coordinator=coordinator, storage=storage, root=tmp_path / "molab-bridge",
+        max_jobs=2, min_priority=500,
+    )
+    try:
+        bridge.ensure_current_batch()
+    except RuntimeError as exc:
+        assert "pointer failure" in str(exc)
+    else:
+        raise AssertionError("expected first publish to fail")
+    exported_after_failure = len(coordinator.list_jobs("EXPORTED"))
+
+    current = bridge.ensure_current_batch()
+
+    assert current is not None
+    assert exported_after_failure == 2
+    assert len(coordinator.list_jobs("EXPORTED")) == 2
+
+
+def test_molab_s3_bridge_recovers_complete_tree_without_ready_pointer(tmp_path: Path):
+    from chessgrandmaster.coordinator.molab_s3_bridge import MolabS3Bridge, READY_POINTER as MOLAB_READY
+    from chessgrandmaster.coordinator.molab_s3_worker import run_molab_s3_cycle
+
+    coordinator = seed_coordinator(tmp_path, 1)
+    storage = MemoryStorage()
+    bridge = MolabS3Bridge(
+        coordinator=coordinator, storage=storage, root=tmp_path / "molab-bridge",
+        max_jobs=1, min_priority=500,
+    )
+    first = bridge.ensure_current_batch()
+    assert first is not None
+    run_molab_s3_cycle(storage=storage, work_root=tmp_path / "molab-work", executor=fake_executor)
+    storage.delete(MOLAB_READY)
+
+    processed = bridge.poll_once()
+
+    assert processed is not None
+    assert processed.batch_id == first.batch_id
+    assert processed.completed == 1
+    assert processed.rejected == 0
+
+
+def test_molab_s3_worker_resumes_completed_remote_shards(tmp_path: Path):
+    from chessgrandmaster.coordinator.molab_s3_bridge import MolabS3Bridge, READY_POINTER as MOLAB_READY
+    from chessgrandmaster.coordinator.molab_s3_worker import run_molab_s3_cycle
+
+    coordinator = seed_coordinator(tmp_path, 2)
+    storage = MemoryStorage()
+    bridge = MolabS3Bridge(
+        coordinator=coordinator, storage=storage, root=tmp_path / "molab-bridge",
+        max_jobs=2, min_priority=500,
+    )
+    bridge.ensure_current_batch()
+    calls = []
+
+    def fail_second(bundle: Path, result: Path, provider: str) -> Path:
+        job_id = json.loads((bundle / "job.json").read_text())["job_id"]
+        calls.append(job_id)
+        if job_id == "job-1":
+            raise RuntimeError("fixture interruption")
+        return fake_executor(bundle, result, provider)
+
+    try:
+        run_molab_s3_cycle(storage=storage, work_root=tmp_path / "molab-work-1", executor=fail_second)
+    except RuntimeError as exc:
+        assert "fixture interruption" in str(exc)
+    else:
+        raise AssertionError("expected interrupted first cycle")
+    assert "runtime/" in next(key for key in storage.files if key.endswith("results/0000/checksums.json"))
+    assert MOLAB_READY not in storage.files
+
+    resumed = run_molab_s3_cycle(storage=storage, work_root=tmp_path / "molab-work-2", executor=fake_executor)
+
+    assert resumed.skipped == 1
+    assert resumed.executed == 1
+    assert MOLAB_READY in storage.files
+
+
+def test_molab_s3_worker_uploads_shard_checksum_last(tmp_path: Path):
+    from chessgrandmaster.coordinator.molab_s3_bridge import MolabS3Bridge
+    from chessgrandmaster.coordinator.molab_s3_worker import run_molab_s3_cycle
+
+    coordinator = seed_coordinator(tmp_path, 1)
+    storage = MemoryStorage()
+    bridge = MolabS3Bridge(
+        coordinator=coordinator, storage=storage, root=tmp_path / "molab-bridge",
+        max_jobs=1, min_priority=500,
+    )
+    current = bridge.ensure_current_batch()
+    assert current is not None
+    storage.upload_log.clear()
+
+    run_molab_s3_cycle(storage=storage, work_root=tmp_path / "molab-work", executor=fake_executor)
+
+    prefix = f"runtime/{current.batch_id}/result/results/0000/"
+    shard_uploads = [path for path in storage.upload_log if path.startswith(prefix)]
+    assert shard_uploads[-1] == prefix + "checksums.json"

@@ -98,3 +98,12 @@ def test_molab_can_download_verified_oracle_workload():
     assert "SHA256 mismatch" in text
     assert 'data_root / "input.pgn"' in text
     assert 'data_root / "molab-workload.json"' in text
+
+
+def test_molab_exposes_one_click_s3_coordinator_cycle():
+    text = NOTEBOOK.read_text(encoding="utf-8")
+    assert "Run next Oracle S3 batch" in text
+    assert "run_molab_s3_cycle.py" in text
+    assert "CGM_MOLAB_S3_ENDPOINT" in text
+    assert "CGM_MOLAB_S3_BUCKET" in text
+    assert "CGM_INSTALL_S3" in text
