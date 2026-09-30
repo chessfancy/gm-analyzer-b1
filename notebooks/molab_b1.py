@@ -654,5 +654,56 @@ and import them automatically; no manual download is required."""
     return
 
 
+@app.cell
+def _(mo):
+    relay_coordinator_button = mo.ui.run_button(
+        label="Run next Oracle relay batch",
+        kind="success",
+    )
+    mo.vstack([
+        mo.md(
+            """## Oracle coordinator — HTTPS relay one-click worker
+
+Requires Molab secret `CGM_MOLAB_RELAY_TOKEN`. The relay URL defaults to
+`https://mo.chessfancy.com/v1`. Completed shards and heartbeat are uploaded
+as they finish, so a later session can resume without redoing completed shards."""
+        ),
+        relay_coordinator_button,
+    ])
+    return (relay_coordinator_button,)
+
+
+@app.cell
+def _(data_root, mo, os, relay_coordinator_button, repo_dir, setup_status, subprocess, venv_dir):
+    mo.stop(
+        not relay_coordinator_button.value,
+        mo.md("Click **Run next Oracle relay batch** after setup."),
+    )
+    _env = os.environ.copy()
+    _env.setdefault("CGM_MOLAB_RELAY_URL", "https://mo.chessfancy.com/v1")
+    if not _env.get("CGM_MOLAB_RELAY_TOKEN"):
+        raise RuntimeError(
+            "Missing Molab secret CGM_MOLAB_RELAY_TOKEN. Add it to Molab Secrets, then run again."
+        )
+    _env["CGM_VENV"] = str(venv_dir)
+    _env["CGM_HOME"] = str(data_root)
+    _env["CGM_STOCKFISH"] = setup_status["engine"]
+    _runner = repo_dir / "scripts" / "workers" / "run_molab_http_cycle.py"
+    _work_root = data_root / "http-worker"
+    subprocess.run(
+        [str(venv_dir / "bin" / "python"), str(_runner), "--work-root", str(_work_root)],
+        cwd=repo_dir,
+        env=_env,
+        check=True,
+    )
+    mo.md(
+        """## Oracle relay batch complete
+
+Result shards and `ready.json` are already on `mo.chessfancy.com`.
+Oracle will checksum-verify and import them automatically."""
+    )
+    return
+
+
 if __name__ == "__main__":
     app.run()

@@ -64,3 +64,14 @@ def test_oracle_has_molab_s3_bridge_runner_and_secret_setup():
     assert "CGM_MOLAB_S3_ENDPOINT" in bridge.read_text(encoding="utf-8")
     assert "molab_s3.env" in wrapper.read_text(encoding="utf-8")
     assert "read -rs" in secrets.read_text(encoding="utf-8")
+
+
+def test_molab_http_relay_scripts_exist():
+    root = Path(__file__).resolve().parents[2]
+    for relative in (
+        "scripts/oracle/run_molab_http_bridge.py",
+        "scripts/oracle/run_molab_http_bridge.sh",
+        "scripts/workers/run_molab_http_cycle.py",
+        "src/chessgrandmaster/relay_server.py",
+    ):
+        assert (root / relative).is_file(), relative
