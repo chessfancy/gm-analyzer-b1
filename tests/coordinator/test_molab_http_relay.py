@@ -104,3 +104,46 @@ def test_http_mailbox_upload_streams_without_path_read_bytes(tmp_path: Path, mon
         admin.upload("runtime/batch-a/blob.bin", source)
     finally:
         server.shutdown(); server.server_close(); thread.join(timeout=2)
+
+
+def test_relay_accepts_hashed_admin_secret(tmp_path: Path):
+    from chessgrandmaster.coordinator.http_mailbox import HTTPMailboxStorage
+    from chessgrandmaster.relay_server import build_server
+    import hashlib
+
+    secret = "oracle-only-admin-secret"
+    server = build_server(
+        root=tmp_path / "relay", host="127.0.0.1", port=0,
+        admin_token="", admin_token_sha256=hashlib.sha256(secret.encode()).hexdigest(),
+        worker_token="worker-token",
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+    try:
+        admin = HTTPMailboxStorage(base_url=f"http://127.0.0.1:{server.server_port}/v1", token=secret)
+        source = tmp_path / "x"; source.write_bytes(b"x")
+        admin.upload("runtime/batch/x", source)
+        assert admin.read_bytes("runtime/batch/x") == b"x"
+    finally:
+        server.shutdown(); server.server_close(); thread.join(timeout=2)
+
+
+def test_relay_local_admin_path_works_without_bearer_token(tmp_path: Path):
+    from chessgrandmaster.coordinator.http_mailbox import HTTPMailboxStorage
+    from chessgrandmaster.relay_server import build_server
+
+    server = build_server(
+        root=tmp_path / "relay", host="127.0.0.1", port=0,
+        admin_token="admin-token", worker_token="worker-token", local_admin_path=True,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+    try:
+        admin = HTTPMailboxStorage(
+            base_url=f"http://127.0.0.1:{server.server_port}/oracle/v1", token=""
+        )
+        source = tmp_path / "x"; source.write_bytes(b"x")
+        admin.upload("runtime/batch/x", source)
+        assert admin.read_bytes("runtime/batch/x") == b"x"
+        admin.delete("runtime/batch/x")
+        assert admin.read_bytes("runtime/batch/x") is None
+    finally:
+        server.shutdown(); server.server_close(); thread.join(timeout=2)

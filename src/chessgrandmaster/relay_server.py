@@ -45,9 +45,16 @@ def _worker_allowed(root: Path, method: str, key: str) -> bool:
     return False
 
 
-def build_server(*, root: str | Path, host: str, port: int, admin_token: str, worker_token: str) -> ThreadingHTTPServer:
+def build_server(*, root: str | Path, host: str, port: int, admin_token: str = "",
+                 admin_token_sha256: str = "", worker_token: str,
+                 local_admin_path: bool = False) -> ThreadingHTTPServer:
     storage_root = Path(root).resolve(); storage_root.mkdir(parents=True, exist_ok=True)
-    if not admin_token or not worker_token or hmac.compare_digest(admin_token, worker_token):
+    admin_hash = admin_token_sha256.lower().strip()
+    if admin_token:
+        admin_hash = hashlib.sha256(admin_token.encode()).hexdigest()
+    if len(admin_hash) != 64 or any(c not in "0123456789abcdef" for c in admin_hash):
+        raise ValueError("admin token or SHA256 must be configured")
+    if not worker_token or hmac.compare_digest(admin_hash, hashlib.sha256(worker_token.encode()).hexdigest()):
         raise ValueError("admin and worker tokens must be distinct and non-empty")
 
     class Handler(BaseHTTPRequestHandler):
@@ -62,32 +69,43 @@ def build_server(*, root: str | Path, host: str, port: int, admin_token: str, wo
             auth = self.headers.get("Authorization", "")
             if not auth.startswith("Bearer "): return None
             token = auth[7:]
-            if hmac.compare_digest(token, admin_token): return "admin"
+            token_hash = hashlib.sha256(token.encode()).hexdigest()
+            if hmac.compare_digest(token_hash, admin_hash): return "admin"
             if hmac.compare_digest(token, worker_token): return "worker"
             return None
         def _object(self):
-            prefix = "/v1/objects/"
-            if not self.path.startswith(prefix): raise ValueError("not an object path")
+            worker_prefix = "/v1/objects/"
+            admin_prefix = "/oracle/v1/objects/"
+            is_local_admin = False
+            if self.path.startswith(admin_prefix):
+                prefix = admin_prefix
+                is_local_admin = True
+            elif self.path.startswith(worker_prefix):
+                prefix = worker_prefix
+            else:
+                raise ValueError("not an object path")
             key = _safe_key(self.path[len(prefix):].split("?", 1)[0])
             target = (storage_root / Path(*PurePosixPath(key).parts)).resolve()
             if storage_root != target and storage_root not in target.parents: raise ValueError("unsafe target")
-            return key, target
-        def _authorized(self, method: str, key: str) -> bool:
+            return key, target, is_local_admin
+        def _authorized(self, method: str, key: str, is_local_admin: bool) -> bool:
+            if is_local_admin and local_admin_path:
+                return True
             role = self._role()
             return role == "admin" or (role == "worker" and _worker_allowed(storage_root, method, key))
         def do_GET(self):
             if self.path == "/healthz": return self._json(200, {"ok": True})
-            try: key, target = self._object()
+            try: key, target, is_local_admin = self._object()
             except ValueError as exc: return self._json(400, {"error": str(exc)})
-            if not self._authorized("GET", key): return self._json(403, {"error": "forbidden"})
+            if not self._authorized("GET", key, is_local_admin): return self._json(403, {"error": "forbidden"})
             if not target.is_file(): return self._json(404, {"error": "not found"})
             size = target.stat().st_size; self.send_response(200); self.send_header("Content-Type", "application/octet-stream")
             self.send_header("Content-Length", str(size)); self.end_headers()
             with target.open("rb") as handle: shutil.copyfileobj(handle, self.wfile, length=1024 * 1024)
         def do_PUT(self):
-            try: key, target = self._object()
+            try: key, target, is_local_admin = self._object()
             except ValueError as exc: return self._json(400, {"error": str(exc)})
-            if not self._authorized("PUT", key): return self._json(403, {"error": "forbidden"})
+            if not self._authorized("PUT", key, is_local_admin): return self._json(403, {"error": "forbidden"})
             try: length = int(self.headers.get("Content-Length", "-1"))
             except ValueError: length = -1
             if length < 0 or length > MAX_OBJECT_BYTES: return self._json(413, {"error": "invalid object size"})
@@ -112,9 +130,9 @@ def build_server(*, root: str | Path, host: str, port: int, admin_token: str, wo
                 try: temp.unlink()
                 except FileNotFoundError: pass
         def do_DELETE(self):
-            try: key, target = self._object()
+            try: key, target, is_local_admin = self._object()
             except ValueError as exc: return self._json(400, {"error": str(exc)})
-            if self._role() != "admin": return self._json(403, {"error": "forbidden"})
+            if not (is_local_admin and local_admin_path) and self._role() != "admin": return self._json(403, {"error": "forbidden"})
             try: target.unlink()
             except FileNotFoundError: pass
             return self._json(200, {"ok": True})
@@ -125,8 +143,13 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(); parser.add_argument("--root", default=os.environ.get("CGM_RELAY_ROOT", "/var/lib/cgm-relay"))
     parser.add_argument("--host", default=os.environ.get("CGM_RELAY_HOST", "127.0.0.1")); parser.add_argument("--port", type=int, default=int(os.environ.get("CGM_RELAY_PORT", "8787")))
     args = parser.parse_args(argv)
-    admin = os.environ.get("CGM_RELAY_ADMIN_TOKEN", ""); worker = os.environ.get("CGM_RELAY_WORKER_TOKEN", "")
-    server = build_server(root=args.root, host=args.host, port=args.port, admin_token=admin, worker_token=worker)
+    admin = os.environ.get("CGM_RELAY_ADMIN_TOKEN", "")
+    admin_hash = os.environ.get("CGM_RELAY_ADMIN_TOKEN_SHA256", "")
+    worker = os.environ.get("CGM_RELAY_WORKER_TOKEN", "")
+    local_admin = os.environ.get("CGM_RELAY_LOCAL_ADMIN_PATH", "0").strip().lower() in {"1", "true", "yes"}
+    server = build_server(root=args.root, host=args.host, port=args.port,
+                          admin_token=admin, admin_token_sha256=admin_hash,
+                          worker_token=worker, local_admin_path=local_admin)
     server.serve_forever(); return 0
 
 if __name__ == "__main__": raise SystemExit(main())

@@ -11,7 +11,11 @@ def required(name: str) -> str:
     if not value: raise RuntimeError(f"missing required environment variable: {name}")
     return value
 def main() -> int:
-    storage = HTTPMailboxStorage(base_url=required("CGM_MOLAB_RELAY_URL"), token=required("CGM_MOLAB_RELAY_ADMIN_TOKEN"), timeout=300)
+    storage = HTTPMailboxStorage(
+        base_url=required("CGM_MOLAB_RELAY_URL"),
+        token=os.environ.get("CGM_MOLAB_RELAY_ADMIN_TOKEN", "").strip(),
+        timeout=300,
+    )
     bridge = MolabS3Bridge(coordinator=Coordinator(CGM / "coordinator.sqlite", archive_root=CGM / "archive"), storage=storage,
                           root=CGM / "molab-http-bridge", max_jobs=int(os.environ.get("CGM_MOLAB_MAX_JOBS", "45")), min_priority=500)
     processed = bridge.poll_once(); current = bridge.ensure_current_batch()

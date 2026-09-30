@@ -18,8 +18,6 @@ class HTTPMailboxStorage:
         self.timeout = int(timeout)
         if not self.base_url.startswith(("https://", "http://")):
             raise ValueError("relay base_url must be http(s)")
-        if not self.token:
-            raise ValueError("relay token must not be empty")
 
     def _url(self, key: str) -> str:
         if not key or key.startswith("/") or "\\" in key or ".." in key.split("/"):
@@ -27,7 +25,9 @@ class HTTPMailboxStorage:
         return self.base_url + "/objects/" + urllib.parse.quote(key, safe="/")
 
     def _request(self, key: str, *, method: str = "GET", data=None, headers=None):
-        merged = {"Authorization": f"Bearer {self.token}", "User-Agent": "ChessGrandmaster/1.0"}
+        merged = {"User-Agent": "ChessGrandmaster/1.0"}
+        if self.token:
+            merged["Authorization"] = f"Bearer {self.token}"
         if headers: merged.update(headers)
         request = urllib.request.Request(self._url(key), data=data, method=method, headers=merged)
         try:
@@ -73,7 +73,8 @@ class HTTPMailboxStorage:
         target = urllib.parse.urlunsplit(("", "", parsed.path, parsed.query, ""))
         try:
             connection.putrequest("PUT", target)
-            connection.putheader("Authorization", f"Bearer {self.token}")
+            if self.token:
+                connection.putheader("Authorization", f"Bearer {self.token}")
             connection.putheader("User-Agent", "ChessGrandmaster/1.0")
             connection.putheader("Content-Type", "application/octet-stream")
             connection.putheader("Content-Length", str(source.stat().st_size))
