@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import importlib.util
 import json
 from pathlib import Path
@@ -25,6 +26,8 @@ CONFIG = Path("/home/ubuntu/.config/cgm/deepnote-worker.json")
 SECRET = Path("/home/ubuntu/.config/cgm/secrets/deepnote_api_key")
 DISPATCH = REPO / "scripts/oracle/deepnote_dispatch.py"
 BASE = "https://api.deepnote.com/v2"
+AUTOTRIGGER_STATE = BRIDGE_ROOT / "autotrigger.json"
+ACTIVE_RUN_STATES = {"pending", "running"}
 
 _spec = importlib.util.spec_from_file_location("cgm_deepnote_dispatch", DISPATCH)
 if _spec is None or _spec.loader is None:
@@ -80,6 +83,75 @@ class DeepnoteProjectStorage:
         dn._delete_file(self.project_id, path)
 
 
+def _write_json_atomic(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(f".{path.name}.tmp")
+    temp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    temp.replace(path)
+
+
+def _find_analyze_block_id(notebook: dict) -> str:
+    blocks = notebook.get("blocks") or []
+    matches = [
+        str(block.get("id") or "")
+        for block in blocks
+        if isinstance(block, dict)
+        and "run_deepnote_manual_cycle.py" in str(block.get("content") or "")
+    ]
+    matches = [value for value in matches if value]
+    if len(matches) != 1:
+        raise RuntimeError(f"expected exactly one Deepnote ANALYZE block, got {matches}")
+    return matches[0]
+
+
+def maybe_auto_trigger(*, current, storage, config: dict, state_path: Path = AUTOTRIGGER_STATE) -> dict:
+    if current is None:
+        return {"triggered": False, "reason": "no-current-batch"}
+    batch_id = str(current.batch_id)
+    previous = json.loads(state_path.read_text(encoding="utf-8")) if state_path.is_file() else {}
+    if str(previous.get("batch_id") or "") == batch_id:
+        return {
+            "triggered": False,
+            "batch_id": batch_id,
+            "reason": "already-triggered",
+            "run_id": previous.get("run_id"),
+        }
+
+    progress_path = f"cgm-manual/runtime/{batch_id}/progress.json"
+    progress_bytes = storage.read_bytes(progress_path)
+    if progress_bytes is not None:
+        progress = json.loads(progress_bytes.decode("utf-8"))
+        if str(progress.get("state") or "") == "complete":
+            return {"triggered": False, "batch_id": batch_id, "reason": "already-complete"}
+
+    notebook_id = str(config["notebook_id"])
+    history = dn._request_json("GET", f"/notebooks/{notebook_id}/runs?pageSize=20")
+    for run in history.get("runs") or []:
+        if str(run.get("status") or "") in ACTIVE_RUN_STATES:
+            return {
+                "triggered": False,
+                "batch_id": batch_id,
+                "reason": "run-active",
+                "run_id": run.get("runId"),
+            }
+
+    notebook = dn._request_json("GET", f"/notebooks/{notebook_id}")["notebook"]
+    block_id = _find_analyze_block_id(notebook)
+    created = dn._request_json("POST", "/runs", {
+        "notebookId": notebook_id,
+        "detached": False,
+        "blockIds": [block_id],
+    })
+    result = {
+        "batch_id": batch_id,
+        "run_id": str(created["runId"]),
+        "status": str(created["status"]),
+        "triggered_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _write_json_atomic(state_path, result)
+    return {"triggered": True, "batch_id": batch_id, "run_id": result["run_id"], "status": result["status"]}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--coordinator-db", type=Path, default=DB)
@@ -88,6 +160,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-jobs", type=int, default=8)
     parser.add_argument("--min-priority", type=int, default=500)
     parser.add_argument("--max-plies", type=int, default=None)
+    parser.add_argument("--auto-trigger", action="store_true")
+    parser.add_argument("--trigger-state", type=Path, default=AUTOTRIGGER_STATE)
     return parser
 
 
@@ -106,6 +180,11 @@ def main(argv=None) -> int:
     )
     processed = bridge.poll_once()
     current = bridge.ensure_current_batch()
+    auto_trigger = None
+    if args.auto_trigger:
+        auto_trigger = maybe_auto_trigger(
+            current=current, storage=storage, config=config, state_path=args.trigger_state
+        )
     payload = {
         "ok": processed is None or processed.rejected == 0,
         "processed": None if processed is None else {
@@ -114,6 +193,7 @@ def main(argv=None) -> int:
             "rejected": processed.rejected,
             "next_batch_id": processed.next_batch_id,
         },
+        "auto_trigger": auto_trigger,
         "current": None if current is None else {
             "batch_id": current.batch_id,
             "jobs": current.jobs,
