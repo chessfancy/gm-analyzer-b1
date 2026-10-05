@@ -10,4 +10,4 @@ mkdir -p "$CGM/locks" "$CGM/logs"
 exec 9>"$LOCK"
 flock -n 9 || exit 0
 cd "$REPO"
-PYTHONPATH=src .venv/bin/python scripts/oracle/deepnote_manual_bridge.py >>"$LOG" 2>&1
+PYTHONPATH=src .venv/bin/python scripts/oracle/deepnote_manual_bridge.py --auto-trigger >>"$LOG" 2>&1

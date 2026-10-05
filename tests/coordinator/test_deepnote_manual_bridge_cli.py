@@ -23,6 +23,7 @@ def test_deepnote_manual_bridge_wrapper_is_lock_protected():
     assert "flock" in text
     assert "deepnote_manual_bridge.py" in text
     assert "deepnote-manual-bridge.log" in text
+    assert "--auto-trigger" in text
 
 
 def test_deepnote_storage_retries_auto_renamed_upload(tmp_path, monkeypatch):
