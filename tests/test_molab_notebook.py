@@ -107,3 +107,20 @@ def test_molab_exposes_one_click_s3_coordinator_cycle():
     assert "CGM_MOLAB_S3_ENDPOINT" in text
     assert "CGM_MOLAB_S3_BUCKET" in text
     assert "CGM_INSTALL_S3" in text
+
+
+def test_molab_relay_worker_v1_is_cache_busting_secure_entrypoint():
+    notebook = ROOT / "notebooks" / "molab_relay_worker_v1.py"
+    text = notebook.read_text(encoding="utf-8")
+    ast.parse(text)
+
+    assert "marimo.App" in text
+    assert "mo.ui.file(" in text
+    assert "Relay credential" in text
+    assert "Setup / Reuse B1" in text
+    assert "Run Oracle relay batch" in text
+    assert "run_molab_http_cycle.py" in text
+    assert "CGM_MOLAB_RELAY_URL" in text
+    assert "CGM_MOLAB_RELAY_TOKEN" in text
+    assert "https://mo.chessfancy.com/v1" in text
+    assert "CGM_MOLAB_S3_" not in text
