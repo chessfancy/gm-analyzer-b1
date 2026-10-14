@@ -369,3 +369,58 @@ def test_dead_worker_error_reports_exit_codes(monkeypatch):
     jobs = [{"job_id": "j", "game_id": 1, "ply": 1, "fen_before": "x", "played_uci": "y"}]
     with pytest.raises(RuntimeError, match=r"exitcode=-9"):
         list(runner.iter_analyze(jobs))
+
+
+def test_runner_does_not_raise_after_last_result_and_worker_finished_arrive_late(monkeypatch):
+    import chessgrandmaster.parallel_runner as module
+
+    class CleanProcess:
+        exitcode = 0
+        def is_alive(self):
+            return False
+
+    class SinkQueue:
+        def put_nowait(self, value):
+            return None
+
+    class FakeReceiver:
+        def __init__(self):
+            self.messages = [
+                {"type": "job_result", "ok": True, "job_id": "j"},
+                {"type": "worker_finished", "worker_id": 0,
+                 "engine_session_id": "session", "archive_manifest": None},
+            ]
+            self.closed = False
+        def recv(self):
+            return self.messages.pop(0)
+        def close(self):
+            self.closed = True
+
+    receiver = FakeReceiver()
+    runner = module.ParallelLucasRunner("/bin/false", workers=1, depth=19)
+
+    def fake_start():
+        runner.processes = [CleanProcess()]
+        runner.job_queues = [SinkQueue()]
+        runner.result_receivers = [receiver]
+
+    # Model a short delay before the first result pipe becomes readable. The
+    # runner queues its sentinel first, then drains the last result and the
+    # clean-finish message after the worker has exited.
+    wait_calls = 0
+    def fake_wait(connections, timeout):
+        nonlocal wait_calls
+        wait_calls += 1
+        if wait_calls == 1:
+            return []
+        return [connection for connection in connections
+                if getattr(connection, "messages", [])]
+
+    monkeypatch.setattr(runner, "start", fake_start)
+    monkeypatch.setattr(module, "wait_connections", fake_wait)
+
+    jobs = [{"job_id": "j", "game_id": 1, "ply": 1}]
+    results = list(runner.iter_analyze(jobs))
+
+    assert [item["job_id"] for item in results] == ["j"]
+    assert receiver.closed is True

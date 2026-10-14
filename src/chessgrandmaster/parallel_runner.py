@@ -481,6 +481,13 @@ class ParallelLucasRunner:
                         yield result
                 continue
 
+            # The non-blocking read above may have consumed the final job_result
+            # and worker_finished messages after made_progress was computed.
+            # Re-check completion before treating clean process exit as a pipe
+            # failure; otherwise a fully drained run can be reported as failed.
+            if received >= len(jobs) and len(finished_workers) >= self.num_workers:
+                break
+
             if self.processes and all(not process.is_alive() for process in self.processes):
                 exitcodes = ", ".join(
                     f"worker={index} exitcode={process.exitcode}"
