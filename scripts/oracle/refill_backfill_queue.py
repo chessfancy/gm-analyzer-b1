@@ -35,9 +35,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    coordinator = Coordinator(args.coordinator_db, archive_root=args.archive_root)
+    recovered = coordinator.recover_stale_attempts()
     summary = refill_backfill_queue(
         registry=Registry(args.registry),
-        coordinator=Coordinator(args.coordinator_db, archive_root=args.archive_root),
+        coordinator=coordinator,
         package_root=args.package_root,
         source_name=args.source,
         low_watermark=args.low_watermark,
@@ -45,7 +47,9 @@ def main(argv=None) -> int:
         target_plies=args.target_plies,
         priority=args.priority,
     )
-    print(json.dumps(asdict(summary), sort_keys=True))
+    payload = asdict(summary)
+    payload["expired_leases_recovered"] = recovered
+    print(json.dumps(payload, sort_keys=True))
     return 0
 
 

@@ -61,7 +61,7 @@ def test_auto_trigger_starts_only_analyze_block_in_live_mode(tmp_path, monkeypat
     assert saved["run_id"] == "run-new"
 
 
-def test_auto_trigger_does_not_repeat_same_batch(tmp_path, monkeypatch):
+def test_auto_trigger_does_not_repeat_same_batch_while_run_is_active(tmp_path, monkeypatch):
     module = load_module()
     state_path = tmp_path / "autotrigger.json"
     state_path.write_text(json.dumps({
@@ -69,11 +69,15 @@ def test_auto_trigger_does_not_repeat_same_batch(tmp_path, monkeypatch):
         "run_id": "run-existing",
         "status": "running",
     }), encoding="utf-8")
+    calls = []
 
-    def should_not_call(*args, **kwargs):
-        raise AssertionError("Deepnote API must not be called for an already-triggered batch")
+    def fake_request(method, path, payload=None, **kwargs):
+        calls.append((method, path, payload))
+        if method == "GET" and path.endswith("/runs?pageSize=20"):
+            return {"runs": [{"runId": "run-existing", "status": "running"}]}
+        raise AssertionError((method, path, payload))
 
-    monkeypatch.setattr(module.dn, "_request_json", should_not_call)
+    monkeypatch.setattr(module.dn, "_request_json", fake_request)
     result = module.maybe_auto_trigger(
         current=SimpleNamespace(batch_id="batch-1"),
         storage=EmptyStorage(),
@@ -84,9 +88,10 @@ def test_auto_trigger_does_not_repeat_same_batch(tmp_path, monkeypatch):
     assert result == {
         "triggered": False,
         "batch_id": "batch-1",
-        "reason": "already-triggered",
+        "reason": "run-active",
         "run_id": "run-existing",
     }
+    assert not any(method == "POST" for method, _, _ in calls)
 
 
 class CompleteStorage:
