@@ -212,7 +212,7 @@ def test_filesystem_transport_validates_and_copies_job_bundle(tmp_path: Path):
 
 
 
-def test_lease_order_is_deterministic_by_priority_then_job_id(tmp_path: Path):
+def test_lease_order_is_deterministic_by_priority_then_registration_age(tmp_path: Path):
     coordinator = make_coordinator(tmp_path)
     make_job_bundle(tmp_path / "job-z", "job-z")
     make_job_bundle(tmp_path / "job-a", "job-a")
@@ -223,7 +223,8 @@ def test_lease_order_is_deterministic_by_priority_then_job_id(tmp_path: Path):
     second = coordinator.lease_next("worker-2", "kaggle")
 
     assert first is not None and second is not None
-    assert [first.job_id, second.job_id] == ["job-a", "job-z"]
+    # Equal-priority jobs are FIFO by registration time, not lexical ID.
+    assert [first.job_id, second.job_id] == ["job-z", "job-a"]
 
 
 def test_expired_lease_becomes_stale_and_retry_pending(tmp_path: Path):

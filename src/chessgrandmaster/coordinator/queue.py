@@ -398,7 +398,7 @@ class Coordinator:
                 f"""
                 SELECT * FROM jobs
                 WHERE {' AND '.join(conditions)}
-                ORDER BY priority DESC, job_id ASC
+                ORDER BY priority DESC, registered_at ASC, job_id ASC
                 LIMIT 1
                 """,
                 parameters,
